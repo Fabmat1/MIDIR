@@ -159,6 +159,7 @@ def get_montecarlo_results(reduction_options):
 			x_fit = np.linspace(bin_edges[0], bin_edges[-1], 1000)
 			y_fit = markov_gaussian(x_fit, *popt)
 			plt.plot(x_fit, y_fit, color='red', label='Gaussian fit')
+			plt.title(f"MCMC result histogram: {['Offset', 'Linear', 'Quadratic', 'Cubic'][i]} Parameter")
 			plt.xlabel('Data')
 			plt.ylabel('Frequency')
 			plt.legend()

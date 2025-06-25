@@ -20,7 +20,7 @@ import astropy.units as u
 
 
 def is_compressed_by_extension(filepath):
-	compressed_exts = {'.gz', '.zip', '.bz2', '.xz', '.7z', '.rar', '.Z'}
+	compressed_exts = {'.gz', '.zip', '.bz2', '.xz', '.7z', '.rar', '.z'}
 	extension = Path(filepath).suffix.lower()
 
 	if extension in compressed_exts:

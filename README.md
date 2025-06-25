@@ -41,6 +41,8 @@ python main.py
 
 The GUI will guide you through selecting your input files, configuring reduction options, and saving or loading presets.
 
+[Read the full instructions on using the GUI here](INSTRUCTIONS.md)
+
 ## Folder Structure
 
 ```bash
