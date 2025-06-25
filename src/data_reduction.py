@@ -216,22 +216,27 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 								  xarr,
 								  data,
 								  p0=[
-									  5 * np.max(data), len(data) / 2, 20, 0
+									  5 * np.max(data), xarr[np.argmax(data)], 10, np.median(data)
 								  ],
 								  bounds=[
 									  [0, len(data) * 1 / 4, 1, -np.inf],
-									  [np.inf, len(data) * 3 / 4, np.inf, np.inf]
+									  [np.inf, len(data) * 3 / 4, len(xarr)/4, np.inf]
 								  ],
-								  maxfev=100000)
+								  maxfev=10000)
 		except (ValueError, RuntimeError):
 			continue
+
+		# plt.plot(xarr, data)
+		# plt.plot(xarr, gaussian(xarr, 5 * np.max(data), xarr[np.argmax(data)], 10, np.median(data)))
+		# plt.plot(xarr, gaussian(xarr, *params))
+		# plt.show()
 
 		width.append(params[2])
 		xcenters.append(int(i))
 		ycenters.append(params[1])
 
 
-	width = 2 * np.mean(width)
+	width = 2 * np.median(width)
 	params, _ = curve_fit(lowpoly,
 						  xcenters,
 						  ycenters,
