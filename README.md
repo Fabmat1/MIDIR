@@ -58,6 +58,7 @@ MIDIR/
 ## Contributing
 
 Contributions are welcome! Please open an issue or pull request if you would like to suggest improvements, report bugs, or add features.
-License
+
+## License
 
 This project is licensed under the MIT License. See LICENSE for details.
