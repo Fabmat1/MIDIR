@@ -1,6 +1,6 @@
 # MIDIR – Multi-Instrument Data Input Reduce-inator
 
-**MIDIR** is a flexible and modular data reduction toolkit designed to streamline the processing of scientific data from multiple instruments. With a focus on usability, reproducibility, and performance, MIDIR provides a graphical user interface and robust backend for handling a variety of input formats and reduction tasks.
+**MIDIR** is a flexible and modular data reduction toolkit designed to streamline the processing of spectral data from long slit spectrographs. With a focus on usability, reproducibility, and performance, MIDIR provides a graphical user interface and robust backend for handling a variety of input formats and reduction tasks. the goal of MIDIR is to provide a framework that can effortlessly be expanded to work with any long slit spectrograph as a reduction tool.
 
 ## Features
 
