@@ -14,7 +14,7 @@
 
 ### 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/MIDIR.git
+git clone https://github.com/Fabmat1/MIDIR.git
 cd MIDIR
 ```
 ### 2. Install the required Python dependencies:
