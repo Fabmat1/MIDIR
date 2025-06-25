@@ -6,7 +6,6 @@
 
 - Graphical interface for configuring reduction parameters
 - Modular design for adding support for new instruments
-- Support for cropping, bias correction, flat-fielding, and more
 - Customizable presets for recurring workflows
 - Real-time progress tracking
 
