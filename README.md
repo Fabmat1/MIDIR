@@ -43,6 +43,7 @@ The GUI will guide you through selecting your input files, configuring reduction
 
 ## Folder Structure
 
+```bash
 MIDIR/
 ├── main.py                  # Entry point for the application
 ├── requirements.txt         # Python dependencies
@@ -52,6 +53,7 @@ MIDIR/
 │   ├── frames.py            # Frame processing logic
 │   └── ...                  # Additional modules
 └── README.md                # Project documentation
+```
 
 ## Contributing
 
