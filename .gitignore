@@ -10,3 +10,6 @@ output_alfosc
 reduced_spectra_alfosc.csv
 raw_spectra
 *__pycache__*
+EFOSC_testdata
+output_efosc
+reduced_spectra_*

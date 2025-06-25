@@ -74,13 +74,18 @@ class Frame:
 
 			hdul = self._load_fits()
 
-			self.header = dict(hdul[self.reduction_options.header_hdu_ind].header)
-			self.data = hdul[self.reduction_options.image_hdu_ind].data.astype(np.float64)
+			try:
+				self.header = dict(hdul[self.reduction_options.header_hdu_ind].header)
+				self.data = hdul[self.reduction_options.image_hdu_ind].data.astype(np.float64)
+			except IndexError:
+				print("ERROR: Wrong HDU indices! You need to reload your frames!")
+				self.header = None
+				self.data = None
 
 			try:
 				self.obstime = Time(self.header["DATE-OBS"], format='isot', scale='utc')
 				self.obstime += TimeDelta(self.header["EXPTIME"], format='sec')/2
-			except KeyError:
+			except (KeyError, TypeError):
 				self.obstime = None
 			self.type = self.determine_frametype()
 			self.star_info = None
@@ -278,11 +283,11 @@ class Frame:
 					sinfo["parallax"] = star['parallax'] if 'parallax' in star.columns else "N/A"
 					sinfo["parallax_error"] = star['parallax_error'] if 'parallax_error' in star.columns else "N/A"
 					star_found = True
-				except KeyError as e:
+				except (KeyError, IndexError) as e:
 					print(f"Star not found in Gaia catalogues after {tries_to_find_star} iterations, trying with bigger radius...")
 
 			if tries_to_find_star != 1:
-				found_coordinates = SkyCoord(sinfo["ra"], sinfo["dec"], units=(u.deg, u.deg))
+				found_coordinates = SkyCoord(sinfo["ra"], sinfo["dec"], unit=(u.deg, u.deg))
 				print(f"Star from file {self.filepath} was identified as {sinfo['name']} after {tries_to_find_star} iterations.\nDistance from header coordinates is {coord.separation(found_coordinates).arcsecond}\"")
 
 		elif len(sinfo) > 0:
@@ -336,7 +341,12 @@ class Frame:
 class FrameList:
 	def __init__(self, list_of_filepaths, reduction_options):
 		self.reduction_options = reduction_options
-		self.frames = [Frame(filepath, reduction_options) for filepath in list_of_filepaths]
+		self.frames = []
+		for filepath in list_of_filepaths:
+			try:
+				self.frames.append(Frame(filepath, reduction_options))
+			except FileNotFoundError:
+				print(f"WARNING: Could not load file {filepath}, skipping it...")
 		self.master_frame = None
 
 	def filepath_list(self):
@@ -391,8 +401,13 @@ class ComplampList(FrameList):
 		self.reduction_options = reduction_options
 		if len(list_of_frames_or_filepaths) != 0:
 			if not isinstance(list_of_frames_or_filepaths[0], Frame):
-				self.frames = [Frame(filepath, reduction_options) for filepath in list_of_frames_or_filepaths]
-				self.master_frame = None
+				self.frames = []
+				for filepath in list_of_frames_or_filepaths:
+					try:
+						self.frames.append(Frame(filepath, reduction_options))
+					except FileNotFoundError:
+						print(f"WARNING: Could not load file {filepath}, skipping it...")
+					self.master_frame = None
 			else:
 				self.frames = list_of_frames_or_filepaths
 				self.master_frame = None
