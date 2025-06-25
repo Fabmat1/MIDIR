@@ -6,12 +6,85 @@ import tkinter.ttk as ttk
 from PIL import ImageTk, Image
 import sv_ttk
 import copy
+import matplotlib.pyplot as plt
+from scipy.ndimage import median_filter
+from collections import defaultdict
+
 
 from src.frames import *
 from src.options import * 
 from src.data_reduction import reduce_data
 
-# ADD SKYFLUXSEP OPTION AND LOCATION DROPDOWN
+import tkinter as tk
+from tkinter import ttk
+from collections import defaultdict
+
+def filter_by_common_frame_shape(bias_list, flat_list, shifted_flat_list, science_list, complamp_list):
+	# Group frames by their data.shape
+	shape_dict = defaultdict(lambda: {'bias': [], 'flat': [], 'science': [], 'complamp': [], 'shifted_flat': []})
+
+	for frm in bias_list:
+		shape_dict[frm.data.shape]['bias'].append(frm)
+	for frm in flat_list:
+		shape_dict[frm.data.shape]['flat'].append(frm)
+	for frm in science_list:
+		shape_dict[frm.data.shape]['science'].append(frm)
+	for frm in complamp_list:
+		shape_dict[frm.data.shape]['complamp'].append(frm)
+	for frm in shifted_flat_list:
+		shape_dict[frm.data.shape]['shifted_flat'].append(frm)
+
+	# Filter valid groups (those with at least one frame in each of the 4 main lists)
+	valid_shapes = {shape: frames for shape, frames in shape_dict.items()
+					if all(frames[key] for key in ['bias', 'flat', 'science', 'complamp'])}
+
+	if not valid_shapes:
+		print("No common valid frame shape group found.")
+		return  # or raise error
+
+	# If only one valid shape, select it automatically
+	if len(valid_shapes) == 1:
+		selected_shape = next(iter(valid_shapes))
+	else:
+		selected_shape = _prompt_user_for_shape_selection(valid_shapes)
+
+	# Replace original lists with filtered ones
+	selected_group = valid_shapes[selected_shape]
+	bias_list[:] = selected_group['bias']
+	flat_list[:] = selected_group['flat']
+	science_list[:] = selected_group['science']
+	complamp_list[:] = selected_group['complamp']
+	shifted_flat_list[:] = selected_group['shifted_flat']
+
+def _prompt_user_for_shape_selection(valid_shapes):
+	selected = {"shape": None}
+
+	def on_confirm():
+		selection = shape_var.get()
+		selected["shape"] = eval(selection)
+		popup.destroy()
+
+	popup = tk.Tk()
+	popup.title("Select Frame Shape Group")
+	tk.Label(popup, text="Multiple valid frame shape groups found. Please select one:").pack(padx=10, pady=10)
+
+	shape_var = tk.StringVar()
+	dropdown = ttk.Combobox(popup, textvariable=shape_var, state="readonly", width=60)
+
+	options = []
+	for shape, frames in valid_shapes.items():
+		count_summary = f"{len(frames['bias'])} bias, {len(frames['flat'])} flat, {len(frames['science'])} science, {len(frames['complamp'])} complamp"
+		options.append(f"{shape} → {count_summary}")
+	dropdown['values'] = options
+	dropdown.pack(padx=10, pady=5)
+	dropdown.current(0)
+
+	tk.Button(popup, text="OK", command=on_confirm).pack(pady=10)
+	popup.mainloop()
+
+	return eval(shape_var.get().split(' → ')[0])  # e.g., "(1024, 1024)"
+
+
 
 class ConfigWindow(tk.Toplevel):
 	def __init__(self, master):
@@ -38,8 +111,8 @@ class ConfigWindow(tk.Toplevel):
 		notebook.add(file_selection_tab, text='File Selection')
 
 		# Auto-Detect button
-		autodetect_button = ttk.Button(file_selection_tab, text="Auto-Detect (WIP)", command=self.auto_detect)
-		autodetect_button["state"] = "disabled"
+		autodetect_button = ttk.Button(file_selection_tab, text="Auto-Detect", command=self.auto_detect)
+		#autodetect_button["state"] = "disabled"
 		autodetect_button.pack(fill='x', pady=(10, 20), padx=20)
 
 		# Visual separator labeled "OR"
@@ -447,10 +520,185 @@ class ConfigWindow(tk.Toplevel):
 
 		self.lampfilterwindow_var.set(self.reduction_options.lampfilterwindow)
 
+	def user_review_frames(self, bias_list, flat_list, shifted_flat_list, science_list, complamp_list):
+		import tkinter as tk
+		from tkinter import ttk
+
+		review_window = tk.Toplevel()
+		review_window.title("Review Detected Frames")
+		review_window.geometry("900x600")
+		review_window.resizable(False, False)
+
+		frame_dict = {
+			"Bias": bias_list,
+			"Flat": flat_list,
+			"Shifted Flat": shifted_flat_list,
+			"Science": science_list,
+			"Arc": complamp_list
+		}
+
+		listboxes = {}
+		file_to_frame = {}
+
+		# Create tabbed view
+		notebook = ttk.Notebook(review_window)
+		notebook.pack(fill="both", expand=True)
+
+		for category, framelist in frame_dict.items():
+			tab = ttk.Frame(notebook)
+			notebook.add(tab, text=category)
+
+			# Map filenames to frame objects
+			frame_map = {os.path.basename(f.filepath or "Created from array"): f for f in framelist}
+			file_to_frame[category] = frame_map
+
+			# Scrollable Listbox
+			scrollbar = ttk.Scrollbar(tab)
+			listbox = tk.Listbox(tab, selectmode=tk.SINGLE, width=100, height=30)
+			listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+			scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+			listbox.config(yscrollcommand=scrollbar.set)
+			scrollbar.config(command=listbox.yview)
+			listboxes[category] = listbox
+
+			# Populate
+			for filename in frame_map:
+				listbox.insert(tk.END, filename)
+
+			# Right-click menu
+			menu = tk.Menu(listbox, tearoff=0)
+
+			def remove_selected(listbox=listbox, category=category):
+				try:
+					index = listbox.curselection()[0]
+					filename = listbox.get(index)
+					listbox.delete(index)
+
+					# Remove from underlying list
+					frame = file_to_frame[category].get(filename)
+					if frame in frame_dict[category]:
+						frame_dict[category].remove(frame)
+				except IndexError:
+					pass
+
+			menu.add_command(label="Remove Frame", command=remove_selected)
+
+			def show_menu(event, lb=listbox):
+				lb.selection_clear(0, tk.END)
+				index = lb.nearest(event.y)
+				lb.selection_set(index)
+				lb.activate(index)
+				menu.tk_popup(event.x_root, event.y_root)
+
+			listbox.bind("<Button-3>", show_menu)
+
+		review_window.grab_set()
+		review_window.wait_window()  # Wait until user closes window
+
+		return frame_dict["Bias"], frame_dict["Flat"], frame_dict["Shifted Flat"], frame_dict["Science"], frame_dict["Arc"]
+
 
 	def auto_detect(self):
 		folder_path = fd.askdirectory(title=f"Select Folder Containing Raw Files")
-		# Placeholder for future logic
+		
+		find_shifted_flats = False
+		all_frames = []
+
+		for filepath in os.listdir(folder_path):
+			if not ".fits" in filepath:
+				continue
+			frame = Frame(os.path.join(folder_path, filepath), self.reduction_options)
+
+			### Eliminating Alignment frames (Only necessary for SOAR)
+			if "GRATING" in frame.header and "TELESCOP" in frame.header:
+				if frame.header["TELESCOP"] == "SOAR 4.1m":
+					find_shifted_flats = True
+				if frame.header["GRATING"] == "NO_GRATING" and frame.header["TELESCOP"] == "SOAR 4.1m":
+					# Alignment Frames should be the only without a grating
+					continue
+
+			all_frames.append(frame)
+			print(filepath)
+
+		bias_list = []
+		flat_list = []
+		shifted_flat_list = []
+		science_list = []
+		complamp_list = []
+
+		# xs = []
+		# ys = []
+		# ts = []
+		for frm in all_frames:
+			if "OBJECT" in frm.header:
+				if "test" in frm.header["OBJECT"].lower():
+					continue
+
+				if "zero" in frm.header["OBJECT"].lower() or "bias" in frm.header["OBJECT"].lower():
+					bias_list.append(frm)
+					continue
+
+				if "quartz" in frm.header["OBJECT"].lower() or "flat" in frm.header["OBJECT"].lower() or "halogen" in frm.header["OBJECT"].lower():
+					flat_list.append(frm)
+					continue
+
+
+			frm.determine_frametype()
+
+			if frm.type == "Arc":
+				complamp_list.append(frm)
+			elif frm.type == "Science":
+				science_list.append(frm)
+			# xs.append(x)
+			# ys.append(y)
+			# ts.append(t)
+
+		colordict = {"Arc": "Blue", "Science": "Red", "Indeterminate": "Grey"}
+		# plt.scatter(xs, ys, c=[colordict[t] for t in ts])
+		# plt.show()
+		# Group frames by grating angle
+		if find_shifted_flats:
+			angle_groups = defaultdict(list)
+			for frm in flat_list:
+				angle = frm.header["GRT_TARG"]
+				angle_groups[angle].append(frm)
+
+			if len(angle_groups) != 2:
+				raise ValueError("Expected exactly 2 distinct grating angles in flat_list")
+
+			# Sort the angles and separate the frames
+			sorted_angles = sorted(angle_groups.keys())
+			lower_angle, higher_angle = sorted_angles[0], sorted_angles[1]
+
+			shifted_flat_list = angle_groups[higher_angle]
+			flat_list = angle_groups[lower_angle]
+
+		filter_by_common_frame_shape(bias_list,flat_list,shifted_flat_list,science_list,complamp_list)
+
+		bias_list, flat_list, shifted_flat_list, science_list, complamp_list = \
+			self.user_review_frames(bias_list, flat_list, shifted_flat_list, science_list, complamp_list)
+
+
+		self.frame_config.biases = BiasList(bias_list, self.reduction_options)
+		self.frame_config.flats = FlatList(flat_list, self.reduction_options)
+		self.frame_config.shiftedflats = FlatList(shifted_flat_list, self.reduction_options)
+		self.frame_config.comparisonframes = ComplampList(complamp_list, self.reduction_options)
+		self.frame_config.scienceframes = ScienceList(science_list, self.reduction_options)
+
+		for ft in self.file_buttons.keys():
+			existing = getattr(self.frame_config, {
+				"Bias Frames": "biases",
+				"Flat Frames": "flats",
+				"Shifted Flat Frames (Optional)": "shiftedflats",
+				"Arc Frames": "comparisonframes",
+				"Science Frames": "scienceframes"
+			}[ft])
+			try:
+				self.update_file_count_label(ft, len(existing.filepath_list()))
+			except AttributeError:
+				self.update_file_count_label(ft, 0)
+
+		self.frame_config.save_to_json()
 
 	def update_file_count_label(self, frame_type, count):
 		label = self.file_count_labels[frame_type]

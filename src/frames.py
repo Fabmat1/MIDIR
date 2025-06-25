@@ -17,6 +17,7 @@ from astroquery.vizier import Vizier
 import pandas as pd
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+import matplotlib.pyplot as plt
 
 
 def is_compressed_by_extension(filepath):
@@ -87,7 +88,7 @@ class Frame:
 				self.obstime += TimeDelta(self.header["EXPTIME"], format='sec')/2
 			except (KeyError, TypeError):
 				self.obstime = None
-			self.type = self.determine_frametype()
+			self.type = None
 			self.star_info = None
 
 	def rotate(self):
@@ -97,6 +98,16 @@ class Frame:
 		elif angle in (90, 180, 270):
 			k = angle // 90  # number of 90° rotations
 			self.data = np.rot90(self.data, k=k)
+		else:
+			raise ValueError("Rotation angle must be 0, 90, 180, or 270 degrees")
+
+	def reverse_rotate(self):
+		angle = self.reduction_options.rotationangle
+		if angle == 0:
+			return
+		elif angle in (90, 180, 270):
+			k = angle // 90  # number of 90° rotations
+			self.data = np.rot90(self.data, k=-k)  # reverse direction
 		else:
 			raise ValueError("Rotation angle must be 0, 90, 180, or 270 degrees")
 
@@ -213,7 +224,56 @@ class Frame:
 			raise
 
 	def determine_frametype(self):
-		return None
+		current_frm = copy.copy(self)
+		current_frm.rotate()
+		if not self.reduction_options.manual_crop:
+			x_lo = int(current_frm.data.shape[1]*0.15)
+			x_hi = int(current_frm.data.shape[1]*0.85)
+			y_lo = int(current_frm.data.shape[0]*0.15)
+			y_hi = int(current_frm.data.shape[0]*0.85)
+			current_frm.crop(([x_lo, x_hi],[y_lo, y_hi]))
+		else:
+			crop = [[self.reduction_options.x_lo, current_frm.data.shape[1]-self.reduction_options.x_hi], [self.reduction_options.y_hi, current_frm.data.shape[0]-self.reduction_options.y_lo]]
+			current_frm.crop(crop)
+
+		along_x = median_filter(np.sum(current_frm.data, axis=0).astype(np.float32), 15)
+		along_x -= np.min(along_x)
+		along_x /= np.max(along_x)
+
+		along_y = median_filter(np.sum(current_frm.data, axis=1).astype(np.float32), 15)
+		if "TELESCOP" in self.header:
+			if self.header["TELESCOP"] == "NOT":
+				along_y -= minimum_filter(along_y, 25)
+
+		along_y -= np.min(along_y)
+		along_y /= np.max(along_y)
+
+		x_peak_median_diff = np.nanmax(along_x)-np.nanmedian(along_x)
+		y_peak_median_diff = np.nanmax(along_y)-np.nanmedian(along_y)
+
+		if x_peak_median_diff < .5 and y_peak_median_diff < .5:
+			self.type = "Indeterminate"
+		if y_peak_median_diff < 0.8 and x_peak_median_diff > 0.8:
+			self.type = "Arc"
+		else:
+			self.type = "Science"
+
+
+		
+		# if x_peak_median_diff > .8:
+		# 	plt.imshow(current_frm.data, cmap="Greys_r")
+		# 	plt.show()
+		# 	plt.plot(along_x)
+		# 	plt.plot(along_y)
+		# 	plt.show()
+
+		# if y_peak_median_diff < 0.8 and x_peak_median_diff > 0.8:
+		# 	return x_peak_median_diff, y_peak_median_diff, "Arc"
+		# else:
+		# 	return x_peak_median_diff, y_peak_median_diff, "Science"
+			
+		
+		
 
 	def get_star_info(self):
 		rename_dict = {
@@ -340,14 +400,25 @@ class Frame:
 
 class FrameList:
 	def __init__(self, list_of_filepaths, reduction_options):
-		self.reduction_options = reduction_options
-		self.frames = []
-		for filepath in list_of_filepaths:
-			try:
-				self.frames.append(Frame(filepath, reduction_options))
-			except FileNotFoundError:
-				print(f"WARNING: Could not load file {filepath}, skipping it...")
-		self.master_frame = None
+		if len(list_of_filepaths) != 0:
+			if isinstance(list_of_filepaths[0], str):
+				self.reduction_options = reduction_options
+				self.frames = []
+				for filepath in list_of_filepaths:
+					try:
+						self.frames.append(Frame(filepath, reduction_options))
+					except FileNotFoundError:
+						print(f"WARNING: Could not load file {filepath}, skipping it...")
+				self.master_frame = None
+			elif isinstance(list_of_filepaths[0], Frame):
+				self.reduction_options = reduction_options
+				self.frames = list_of_filepaths
+				self.master_frame = None
+
+		else:
+			self.reduction_options = reduction_options
+			self.frames = []
+			self.master_frame = None
 
 	def filepath_list(self):
 		return [frame.filepath for frame in self.frames]
