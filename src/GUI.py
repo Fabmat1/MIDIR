@@ -521,9 +521,6 @@ class ConfigWindow(tk.Toplevel):
 		self.lampfilterwindow_var.set(self.reduction_options.lampfilterwindow)
 
 	def user_review_frames(self, bias_list, flat_list, shifted_flat_list, science_list, complamp_list):
-		import tkinter as tk
-		from tkinter import ttk
-
 		review_window = tk.Toplevel()
 		review_window.title("Review Detected Frames")
 		review_window.geometry("900x600")
@@ -565,38 +562,40 @@ class ConfigWindow(tk.Toplevel):
 			for filename in frame_map:
 				listbox.insert(tk.END, filename)
 
-			# Right-click menu
-			menu = tk.Menu(listbox, tearoff=0)
+			# Capture current category and listbox in closure
+			def bind_right_click(lb, cat):
+				menu = tk.Menu(lb, tearoff=0)
 
-			def remove_selected(listbox=listbox, category=category):
-				try:
-					index = listbox.curselection()[0]
-					filename = listbox.get(index)
-					listbox.delete(index)
+				def remove_selected():
+					try:
+						index = lb.curselection()[0]
+						filename = lb.get(index)
+						lb.delete(index)
 
-					# Remove from underlying list
-					frame = file_to_frame[category].get(filename)
-					if frame in frame_dict[category]:
-						frame_dict[category].remove(frame)
-				except IndexError:
-					pass
+						# Remove from underlying list
+						frame = file_to_frame[cat].get(filename)
+						if frame in frame_dict[cat]:
+							frame_dict[cat].remove(frame)
+					except IndexError:
+						pass
 
-			menu.add_command(label="Remove Frame", command=remove_selected)
+				menu.add_command(label="Remove Frame", command=remove_selected)
 
-			def show_menu(event, lb=listbox):
-				lb.selection_clear(0, tk.END)
-				index = lb.nearest(event.y)
-				lb.selection_set(index)
-				lb.activate(index)
-				menu.tk_popup(event.x_root, event.y_root)
+				def show_menu(event):
+					lb.selection_clear(0, tk.END)
+					index = lb.nearest(event.y)
+					lb.selection_set(index)
+					lb.activate(index)
+					menu.tk_popup(event.x_root, event.y_root)
 
-			listbox.bind("<Button-3>", show_menu)
+				lb.bind("<Button-3>", show_menu)
+
+			bind_right_click(listbox, category)
 
 		review_window.grab_set()
-		review_window.wait_window()  # Wait until user closes window
+		review_window.wait_window()
 
 		return frame_dict["Bias"], frame_dict["Flat"], frame_dict["Shifted Flat"], frame_dict["Science"], frame_dict["Arc"]
-
 
 	def auto_detect(self):
 		folder_path = fd.askdirectory(title=f"Select Folder Containing Raw Files")
