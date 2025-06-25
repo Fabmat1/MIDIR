@@ -1,0 +1,12 @@
+.previousframeconfig.json
+.previousoptions.json
+.previoussolutions.json
+2024-05-30
+linefit
+.temp
+output
+reduced_spectra.csv
+output_alfosc
+reduced_spectra_alfosc.csv
+raw_spectra
+*__pycache__*

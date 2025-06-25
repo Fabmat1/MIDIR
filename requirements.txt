@@ -1,0 +1,9 @@
+numpy
+matplotlib
+scipy
+astropy
+astroquery
+pandas
+Pillow
+sv-ttk
+opencv-python
