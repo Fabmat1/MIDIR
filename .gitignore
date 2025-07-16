@@ -13,3 +13,5 @@ raw_spectra
 EFOSC_testdata
 output_efosc
 reduced_spectra_*
+EFOSC_data
+venv
