@@ -37,6 +37,7 @@ class ReductionOptions:
 			self.cosmicrejection = True
 			self.lampfilterwindow = 50
 			self.use_boxcut = False
+			self.multitrace = False
 			self.rotationangle = 0
 			self.manual_crop = False
 			self.x_lo = 0
@@ -76,6 +77,7 @@ class ReductionOptions:
 		self.cosmicrejection = config["cosmicrejection"]
 		self.lampfilterwindow = config["lampfilterwindow"]
 		self.use_boxcut = config["use_boxcut"]
+		self.multitrace = config["multitrace"]
 		self.rotationangle = config["rotationangle"]
 		self.manual_crop = config["manual_crop"]
 		self.x_lo = config["x_lo"]
@@ -114,6 +116,7 @@ class ReductionOptions:
 			"cosmicrejection": self.cosmicrejection,
 			"lampfilterwindow": self.lampfilterwindow,
 			"use_boxcut": self.use_boxcut,
+			"multitrace": self.multitrace,
 			"rotationangle": self.rotationangle,
 			"manual_crop": self.manual_crop,
 			"x_lo": self.x_lo,
@@ -158,6 +161,7 @@ class ReductionOptions:
  cosmicrejection: {self.cosmicrejection}
  lampfilterwindow: {self.lampfilterwindow}
  use_boxcut: {self.use_boxcut}
+ multitrace: {self.multitrace}
  rotationangle: {self.rotationangle}
  manual_crop: {self.manual_crop}
  x_lo: {self.x_lo},

@@ -301,29 +301,54 @@ class ConfigWindow(tk.Toplevel):
 		# Set initial enabled/disabled state
 		update_crop_status()
 				
+		# Create a grid frame to hold the checkboxes
+		grid_frame = ttk.Frame(content_frame)
+		grid_frame.pack(fill='x', padx=20, pady=(10, 10))
+
+		# Configure grid weights for 60/40 split
+		grid_frame.columnconfigure(0, weight=60)
+		grid_frame.columnconfigure(1, weight=40)
+
+		# Left column frame
+		left_frame = ttk.Frame(grid_frame)
+		left_frame.grid(row=0, column=0, sticky='ew', padx=(0, 10))
+
+		# Right column frame  
+		right_frame = ttk.Frame(grid_frame)
+		right_frame.grid(row=0, column=1, sticky='ew')
+
+		# Left column checkboxes
 		# Checkbox: Cosmic Rejection
 		self.cosmic_reject_var = tk.BooleanVar(value=getattr(self.reduction_options, "cosmicrejection", False))
 		ttk.Checkbutton(
-			content_frame, text="Attempt Automatic Cosmic Rejection",
-			variable=self.cosmic_reject_var,
-			command=lambda: setattr(self.reduction_options, "cosmicrejection", self.cosmic_reject_var.get())
-		).pack(anchor='w', padx=20, pady=(10, 0))
+		    left_frame, text="Attempt Automatic Cosmic Rejection",
+		    variable=self.cosmic_reject_var,
+		    command=lambda: setattr(self.reduction_options, "cosmicrejection", self.cosmic_reject_var.get())
+		).pack(anchor='w', pady=(0, 5))
 
+		# Checkbox: Multitrace (fixed the command to use correct variable)
+		self.multitrace = tk.BooleanVar(value=getattr(self.reduction_options, "multitrace", False))
+		ttk.Checkbutton(
+		    left_frame, text="Interactive Multitrace Extraction",
+		    variable=self.multitrace,
+		    command=lambda: setattr(self.reduction_options, "multitrace", self.multitrace.get())
+		).pack(anchor='w', pady=(0, 0))
+
+		# Right column checkboxes
 		# Checkbox: Boxcut Extraction
 		self.boxcut_var = tk.BooleanVar(value=getattr(self.reduction_options, "use_boxcut", True))
 		ttk.Checkbutton(
-			content_frame, text="Use Boxcut Extraction",
-			variable=self.boxcut_var,
-			command=lambda: setattr(self.reduction_options, "use_boxcut", self.boxcut_var.get())
-		).pack(anchor='w', padx=20, pady=(0, 0))
+		    right_frame, text="Use Boxcut Extraction",
+		    variable=self.boxcut_var,
+		    command=lambda: setattr(self.reduction_options, "use_boxcut", self.boxcut_var.get())
+		).pack(anchor='w', pady=(0, 5))
 
 		# Show Plots checkbox
 		self.show_plots_var = tk.BooleanVar(value=getattr(self.reduction_options, "debugimages", False))
 		ttk.Checkbutton(
-			content_frame, text="Show Plots", variable=self.show_plots_var,
-			command=lambda: setattr(self.reduction_options, "debugimages", self.show_plots_var.get())
-		).pack(anchor='w', padx=20, pady=(0, 10))
-
+		    right_frame, text="Show Plots", variable=self.show_plots_var,
+		    command=lambda: setattr(self.reduction_options, "debugimages", self.show_plots_var.get())
+		).pack(anchor='w', pady=(0, 0))
 
 
 		# Buttons frame that sticks to the bottom
@@ -489,6 +514,7 @@ class ConfigWindow(tk.Toplevel):
 		self.location_var.set(self.reduction_options.telescope_location)
 
 		self.cosmic_reject_var.set(self.reduction_options.cosmicrejection)
+		self.multitrace.set(self.reduction_options.multitrace)
 		self.boxcut_var.set(self.reduction_options.use_boxcut)
 		self.show_plots_var.set(self.reduction_options.debugimages)
 

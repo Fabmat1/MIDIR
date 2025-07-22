@@ -485,17 +485,20 @@ class ComplampList(FrameList):
 		else:
 			self.frames = []
 			self.master_frame = None
-		self.compparams = self.get_compparams()
+		self.compparams = None
 
 	def _get_complamp_key(self):
 		"""Return a unique key for the current set of comp lamps, order-independent."""
 		complamp_names = sorted(frame.filepath for frame in self.frames)
 		return "|".join(complamp_names)
 
-	def get_compparams(self):
+	def get_compparams(self, traceparams):
 		"""Try to load polynomial parameters for current comp lamp set. Set self.compparams."""
+
+		traceparams = [str(t) for t in traceparams]
+
 		paramfile = ".previoussolutions.json"
-		key = self._get_complamp_key()
+		key = self._get_complamp_key() + "|".join(traceparams)
 
 		if os.path.isfile(paramfile):
 			with open(paramfile, "r") as f:
@@ -509,13 +512,16 @@ class ComplampList(FrameList):
 		self.compparams = solutions.get(key, None)
 		return self.compparams
 
-	def save_compparams(self):
+	def save_compparams(self, traceparams):
 		"""Store the current self.compparams under the current set of comp lamps."""
+
+		traceparams = [str(t) for t in traceparams]
+
 		if self.compparams is None:
 			raise ValueError("compparams is None — nothing to save.")
 
 		paramfile = ".previoussolutions.json"
-		key = self._get_complamp_key()
+		key = self._get_complamp_key() + "|".join(traceparams)
 
 		# Load or create solutions
 		if os.path.isfile(paramfile):

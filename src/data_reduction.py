@@ -4,6 +4,7 @@ from src.frames import *
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import matplotlib.cm
+from matplotlib.widgets import Button
 import time
 from astropy.coordinates import SkyCoord, EarthLocation
 from scipy.optimize import curve_fit
@@ -117,6 +118,358 @@ def fluxstatistics(wl, flux):
 	return wl, flux, flx_std
 
 
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from scipy.ndimage import median_filter
+import matplotlib.colors as colors
+
+class InteractiveTraceSelector:
+    def __init__(self, image):
+        self.image = image
+        self.clicks = []
+        self.lines = []
+        self.bounds = None
+        self.reset_pressed = False
+        self.finished = False
+        
+    def setup_plot(self):
+        self.fig, self.ax = plt.subplots(1, 1, figsize=(4.8 * 16 / 9, 4.8))
+        
+        # Display the image
+        norm_l = np.percentile(self.image, 1)
+        norm_h = np.percentile(self.image, 99.9)
+        if norm_l == 0:
+            norm_l = 1
+            
+        self.ax.imshow(self.image, cmap=grey_cmap, norm=colors.LogNorm(norm_l, norm_h), aspect="auto")
+        self.ax.set_title("Click twice to select Y-bounds for trace fitting\nPress 'R' to reset, Enter or close to proceed")
+        
+        # Connect event handlers
+        self.fig.canvas.mpl_connect('button_press_event', self.on_click)
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
+        
+        plt.tight_layout()
+        
+    def on_click(self, event):
+        if event.inaxes != self.ax or len(self.clicks) >= 2:
+            return
+            
+        y_pos = event.ydata
+        if y_pos is None:
+            return
+            
+        self.clicks.append(y_pos)
+        line = self.ax.axhline(y=y_pos, color='red', linestyle='--', linewidth=2)
+        self.lines.append(line)
+        
+        if len(self.clicks) == 2:
+            self.ax.set_title("Bounds selected. Press Enter or close to proceed, 'R' to reset")
+        else:
+            self.ax.set_title(f"Click #{len(self.clicks)+1} to select Y-bounds for trace fitting\nPress 'R' to reset, Enter or close to proceed")
+            
+        self.fig.canvas.draw()
+        
+    def on_key(self, event):
+        if event.key == 'r' or event.key == 'R':
+            # Reset clicks and lines
+            self.clicks = []
+            for line in self.lines:
+                line.remove()
+            self.lines = []
+            self.ax.set_title("Click twice to select Y-bounds for trace fitting\nPress 'R' to reset, Enter or close to proceed")
+            self.fig.canvas.draw()
+        elif event.key == 'enter':
+            self.finish_selection()
+            
+    def on_close(self, event):
+        self.finish_selection()
+        
+    def finish_selection(self):
+        if len(self.clicks) >= 2:
+            self.bounds = (min(self.clicks), max(self.clicks))
+        else:
+            # Use default bounds if insufficient clicks
+            self.bounds = (self.image.shape[0] * 1/4, self.image.shape[0] * 3/4)
+        self.finished = True
+        plt.close(self.fig)
+        
+    def get_bounds(self):
+        self.setup_plot()
+        plt.show()
+        
+        # Wait for user interaction to complete
+        while not self.finished:
+            plt.pause(0.1)
+            
+        return self.bounds
+
+class TraceValidator:
+    def __init__(self, image, xcenters, ycenters, params, width, reduction_options):
+        self.image = image
+        self.xcenters = xcenters
+        self.ycenters = ycenters
+        self.params = params
+        self.width = width
+        self.reduction_options = reduction_options
+        self.accepted = False
+        self.finished = False
+        
+    def setup_plot(self):
+        self.fig, self.axs = plt.subplots(2, 1, figsize=(4.8 * 16 / 9, 4.8))
+        
+        # Plot trace fit
+        xspace = np.linspace(0, self.image.shape[1], 1000)
+        self.axs[0].plot(xspace, lowpoly(xspace, *self.params), zorder=1)
+        self.axs[0].scatter(self.xcenters, self.ycenters, color="red", marker="x", zorder=5)
+        self.axs[0].set_title("Fitted trace - Accept or Reject?")
+        
+        # Plot image with trace
+        norm_l = np.percentile(self.image, 1)
+        norm_h = np.percentile(self.image, 99.9)
+        if norm_l == 0:
+            norm_l = 1
+            
+        self.axs[1].imshow(self.image, cmap=grey_cmap, norm=colors.LogNorm(norm_l, norm_h), aspect="auto")
+        self.axs[1].plot(xspace, lowpoly(xspace, *self.params), color="lime", linewidth=0.5)
+        self.axs[1].plot(xspace, lowpoly(xspace, *self.params) - self.reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
+        self.axs[1].plot(xspace, lowpoly(xspace, *self.params) + self.reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
+        self.axs[1].plot(xspace, lowpoly(xspace, *self.params) + self.width, color="lime", linestyle="--", linewidth=0.5)
+        self.axs[1].plot(xspace, lowpoly(xspace, *self.params) - self.width, color="lime", linestyle="--", linewidth=0.5)
+        
+        # Add title with instructions
+        self.axs[0].set_title("Fitted trace - Press 'Y' to Accept, 'N' to Reject, or close window")
+        
+        # Connect event handlers
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
+        
+        plt.tight_layout()
+        
+    def on_key(self, event):
+        if event.key in ['y', 'Y']:
+            self.accepted = True
+            self.finished = True
+            plt.close(self.fig)
+        elif event.key in ['n', 'N']:
+            self.accepted = False
+            self.finished = True
+            plt.close(self.fig)
+            
+    def on_close(self, event):
+        # Default to rejection if window is closed without decision
+        if not self.finished:
+            self.accepted = True
+            self.finished = True
+        
+    def validate(self):
+        self.setup_plot()
+        plt.show()
+        
+        # Wait for user decision
+        while not self.finished:
+            plt.pause(0.1)
+            
+        return self.accepted
+
+# Main trace fitting function (enhanced version of your original code)
+def fit_spectrum_trace(image, reduction_options, progress_window):
+    """
+    Enhanced trace fitting function with multi-trace support
+    """
+    
+    if not reduction_options.multitrace:
+        # Original single-trace behavior
+        return fit_single_trace(image, reduction_options, progress_window)
+    else:
+        # Multi-trace interactive behavior
+        return fit_multitrace_interactive(image, reduction_options, progress_window)
+
+def fit_single_trace(image, reduction_options, progress_window):
+    """Your original trace fitting code (unchanged)"""
+    ycenters = []
+    xcenters = []
+    width = []
+    progress_window.update_current("Fitting Trace...", 0.24)
+    
+    for i in np.linspace(25, image.shape[1] - 10, 31):
+        if 1013 < i < 1017:  # Ignore bad column
+            continue
+        data = np.min(image[:, int(i - 5):int(i + 5)], axis=1)
+        data = median_filter(data, 5)
+        if np.all(data < 5):
+            continue
+        xarr = np.arange(len(data))
+        try:
+            params, *_ = curve_fit(gaussian,
+                                  xarr,
+                                  data,
+                                  p0=[
+                                      5 * np.max(data), xarr[np.argmax(data)], 10, np.median(data)
+                                  ],
+                                  bounds=[
+                                      [0, len(data) * 1 / 4, 1, -np.inf],
+                                      [np.inf, len(data) * 3 / 4, len(xarr)/4, np.inf]
+                                  ],
+                                  maxfev=10000)
+        except (ValueError, RuntimeError):
+            continue
+            
+        width.append(params[2])
+        xcenters.append(int(i))
+        ycenters.append(params[1])
+        
+    width = 2 * np.median(width)
+    
+    try:
+        params, *_ = curve_fit(lowpoly,
+                              xcenters,
+                              ycenters,
+                              p0=[0, np.mean(np.diff(ycenters) / np.diff(xcenters)), np.mean(ycenters)])
+    except (ValueError, RuntimeError, TypeError) as e:
+        print(f"Error fitting polynomial to trace: {e}")
+        return None, None, None, None
+    
+    xcenters = np.array(xcenters)
+    ycenters = np.array(ycenters)
+    
+    # Check if params is valid before using it
+    if params is None:
+        print("Error: Polynomial fit returned None")
+        return None, None, None, None
+        
+    resids = ((ycenters - lowpoly(xcenters, *params))**2)/lowpoly(xcenters, *params)
+    outsidestd = resids > 1 * np.std(resids)+np.mean(resids)
+    
+    if np.sum(outsidestd.astype(int)) > 0 and not np.sum(outsidestd.astype(int)) > 0.5 * len(xcenters):
+        try:
+            params, *_ = curve_fit(lowpoly,
+                                  xcenters[~outsidestd],
+                                  ycenters[~outsidestd],
+                                  p0=[0, np.mean(np.diff(ycenters) / np.diff(xcenters)), np.mean(ycenters)])
+        except (ValueError, RuntimeError, TypeError) as e:
+            print(f"Error in outlier-filtered polynomial fit: {e}")
+            # Keep the original params if the filtered fit fails
+    
+    # Original debug plotting code
+    if reduction_options.debugimages:
+        xspace = np.linspace(0, image.shape[1], 1000)
+        fig, axs = plt.subplots(2, 1, figsize=(4.8 * 16 / 9, 4.8))
+        axs[0].plot(xspace, lowpoly(xspace, *params), zorder=1)
+        axs[0].scatter(xcenters, ycenters, color="red", marker="x", zorder=5)
+        norm_l = np.percentile(image, 1)
+        norm_h = np.percentile(image, 99.9)
+       
+        if norm_l == 0:
+            norm_l = 1
+               
+        axs[1].imshow(image, cmap=grey_cmap, norm=colors.LogNorm(norm_l, norm_h), aspect="auto")
+        axs[1].plot(xspace, lowpoly(xspace, *params), color="lime", linewidth=0.5)
+        axs[1].plot(xspace, lowpoly(xspace, *params) - reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
+        axs[1].plot(xspace, lowpoly(xspace, *params) + reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
+        axs[1].plot(xspace, lowpoly(xspace, *params) + width, color="lime", linestyle="--", linewidth=0.5)
+        axs[1].plot(xspace, lowpoly(xspace, *params) - width, color="lime", linestyle="--", linewidth=0.5)
+        plt.tight_layout()
+        plt.show()
+    
+    return params, width, xcenters, ycenters
+
+def fit_multitrace_interactive(image, reduction_options, progress_window):
+    """New multi-trace interactive fitting function with retry capability"""
+    
+    while True:  # Loop until user accepts a trace or exits
+        # Interactive bound selection
+        print("Starting interactive trace selection...")
+        selector = InteractiveTraceSelector(image)
+        y_min, y_max = selector.get_bounds()
+        print(f"Selected Y bounds: {y_min:.1f} to {y_max:.1f}")
+        
+        # Fit trace with constrained bounds
+        ycenters = []
+        xcenters = []
+        width = []
+        progress_window.update_current("Fitting Trace...", 0.24)
+        
+        for i in np.linspace(25, image.shape[1] - 10, 31):
+            if 1013 < i < 1017:  # Ignore bad column
+                continue
+            data = np.min(image[:, int(i - 5):int(i + 5)], axis=1)
+            data = median_filter(data, 5)
+            if np.all(data < 5):
+                continue
+            xarr = np.arange(len(data))
+            try:
+                params, *_ = curve_fit(gaussian,
+                                      xarr,
+                                      data,
+                                      p0=[
+                                          5 * np.max(data), (y_min + y_max) / 2, 10, np.median(data)  # Fixed initial guess
+                                      ],
+                                      bounds=[
+                                          [0, y_min, 1, -np.inf],  # Use interactive bounds
+                                          [np.inf, y_max, len(xarr)/4, np.inf]  # Use interactive bounds
+                                      ],
+                                      maxfev=10000)
+            except (ValueError, RuntimeError):
+                continue
+                
+            width.append(params[2])
+            xcenters.append(int(i))
+            ycenters.append(params[1])
+        
+        if not ycenters:
+            print("Warning: No valid trace points found with selected bounds!")
+            print("Please try selecting different bounds.")
+            continue  # Go back to bound selection
+            
+        width = 2 * np.median(width)
+        
+        try:
+            params, *_ = curve_fit(lowpoly,
+                                  xcenters,
+                                  ycenters,
+                                  p0=[0, np.mean(np.diff(ycenters) / np.diff(xcenters)), np.mean(ycenters)])
+        except (ValueError, RuntimeError, TypeError) as e:
+            print(f"Error fitting polynomial to trace: {e}")
+            print("Please try selecting different bounds.")
+            continue  # Go back to bound selection
+        
+        xcenters = np.array(xcenters)
+        ycenters = np.array(ycenters)
+        
+        # Check if params is valid before using it
+        if params is None:
+            print("Error: Polynomial fit returned None")
+            print("Please try selecting different bounds.")
+            continue  # Go back to bound selection
+            
+        resids = ((ycenters - lowpoly(xcenters, *params))**2)/lowpoly(xcenters, *params)
+        outsidestd = resids > 1 * np.std(resids)+np.mean(resids)
+        
+        if np.sum(outsidestd.astype(int)) > 0 and not np.sum(outsidestd.astype(int)) > 0.5 * len(xcenters):
+            try:
+                params, *_ = curve_fit(lowpoly,
+                                      xcenters[~outsidestd],
+                                      ycenters[~outsidestd],
+                                      p0=[0, np.mean(np.diff(ycenters) / np.diff(xcenters)), np.mean(ycenters)])
+            except (ValueError, RuntimeError, TypeError) as e:
+                print(f"Error in outlier-filtered polynomial fit: {e}")
+                # Keep the original params if the filtered fit fails
+        
+        # Interactive validation
+        print("Validating fitted trace...")
+        validator = TraceValidator(image, xcenters, ycenters, params, width, reduction_options)
+        accepted = validator.validate()
+        
+        if accepted:
+            print("Trace accepted!")
+            return params, width, xcenters, ycenters
+        else:
+            print("Trace rejected! Returning to bound selection...")
+            # Continue the loop to restart the process
+
+
 def get_montecarlo_results(reduction_options):
 	i = 0
 	data_list = []
@@ -193,62 +546,13 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 	progress_window.update_current("Correcting Spectral Image...", 0.21)
 	frame.apply_corrections(master_flat, frame_config)
 	image = frame.data
+	 
+	traceparams, width, xcenters, ycenters = fit_spectrum_trace(image, reduction_options, progress_window)
 
-
-	ycenters = []
-	xcenters = []
-	width = []
-
-	progress_window.update_current("Fitting Trace...", 0.24)
-	for i in np.linspace(25, image.shape[1] - 10, 31):
-		if 1013 < i < 1017:  # Ignore bad column
-			continue
-		data = np.min(image[:, int(i - 5):int(i + 5)], axis=1)
-		data = median_filter(data, 5)
-
-		if np.all(data < 5):
-			continue
-
-		xarr = np.arange(len(data))
-
-		try:
-			params, _ = curve_fit(gaussian,
-								  xarr,
-								  data,
-								  p0=[
-									  5 * np.max(data), xarr[np.argmax(data)], 10, np.median(data)
-								  ],
-								  bounds=[
-									  [0, len(data) * 1 / 4, 1, -np.inf],
-									  [np.inf, len(data) * 3 / 4, len(xarr)/4, np.inf]
-								  ],
-								  maxfev=10000)
-		except (ValueError, RuntimeError):
-			continue
-
-		# plt.plot(xarr, data)
-		# plt.plot(xarr, gaussian(xarr, 5 * np.max(data), xarr[np.argmax(data)], 10, np.median(data)))
-		# plt.plot(xarr, gaussian(xarr, *params))
-		# plt.show()
-
-		width.append(params[2])
-		xcenters.append(int(i))
-		ycenters.append(params[1])
-
-
-	width = 2 * np.median(width)
-	params, _ = curve_fit(lowpoly,
-						  xcenters,
-						  ycenters,
-						  p0=[0, np.mean(np.diff(ycenters) / np.diff(xcenters)), np.mean(ycenters)])
-
-	xcenters = np.array(xcenters)
-	ycenters = np.array(ycenters)
-
-	resids = ((ycenters - lowpoly(xcenters, *params))**2)/lowpoly(xcenters, *params)
+	resids = ((ycenters - lowpoly(xcenters, *traceparams))**2)/lowpoly(xcenters, *traceparams)
 	outsidestd = resids > 1 * np.std(resids)+np.mean(resids)
 	if np.sum(outsidestd.astype(int)) > 0 and not np.sum(outsidestd.astype(int)) > 0.5 * len(xcenters):
-		params, _ = curve_fit(lowpoly,
+		traceparams, _ = curve_fit(lowpoly,
 							  xcenters[~outsidestd],
 							  ycenters[~outsidestd],
 							  p0=[0, np.mean(np.diff(ycenters) / np.diff(xcenters)), np.mean(ycenters)])
@@ -256,7 +560,7 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 	if reduction_options.debugimages:
 		xspace = np.linspace(0, image.shape[1], 1000)
 		fig, axs = plt.subplots(2, 1, figsize=(4.8 * 16 / 9, 4.8))
-		axs[0].plot(xspace, lowpoly(xspace, *params), zorder=1)
+		axs[0].plot(xspace, lowpoly(xspace, *traceparams), zorder=1)
 		axs[0].scatter(xcenters, ycenters, color="red", marker="x", zorder=5)
 		norm_l = np.percentile(image, 1)
 		norm_h = np.percentile(image, 99.9)
@@ -265,11 +569,11 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 			norm_l = 1
 			   
 		axs[1].imshow(image, cmap=grey_cmap, norm=colors.LogNorm(norm_l, norm_h), aspect="auto")
-		axs[1].plot(xspace, lowpoly(xspace, *params), color="lime", linewidth=0.5)
-		axs[1].plot(xspace, lowpoly(xspace, *params) - reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
-		axs[1].plot(xspace, lowpoly(xspace, *params) + reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
-		axs[1].plot(xspace, lowpoly(xspace, *params) + width, color="lime", linestyle="--", linewidth=0.5)
-		axs[1].plot(xspace, lowpoly(xspace, *params) - width, color="lime", linestyle="--", linewidth=0.5)
+		axs[1].plot(xspace, lowpoly(xspace, *traceparams), color="lime", linewidth=0.5)
+		axs[1].plot(xspace, lowpoly(xspace, *traceparams) - reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
+		axs[1].plot(xspace, lowpoly(xspace, *traceparams) + reduction_options.skyfluxsep, color="red", linestyle="--", linewidth=0.5)
+		axs[1].plot(xspace, lowpoly(xspace, *traceparams) + width, color="lime", linestyle="--", linewidth=0.5)
+		axs[1].plot(xspace, lowpoly(xspace, *traceparams) - width, color="lime", linestyle="--", linewidth=0.5)
 		plt.tight_layout()
 		plt.show()
 
@@ -279,10 +583,10 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 	master_comp64 = complamplist.master_frame.data.astype(np.float64)
 
 	pixel = np.arange(image.shape[1]).astype(np.float64)
-	flux = np.array([get_flux(image64, p, lowpoly(p, *params), width, reduction_options.use_boxcut) for p in pixel])
-	compflux = np.array([get_flux(master_comp64, p, lowpoly(p, *params), width, reduction_options.use_boxcut) for p in pixel])
-	uskyflx = np.array([get_flux(image64, p, lowpoly(p, *params) + reduction_options.skyfluxsep, width, reduction_options.use_boxcut) for p in pixel])
-	lskyflx = np.array([get_flux(image64, p, lowpoly(p, *params) - reduction_options.skyfluxsep, width, reduction_options.use_boxcut) for p in pixel])
+	flux = np.array([get_flux(image64, p, lowpoly(p, *traceparams), width, reduction_options.use_boxcut) for p in pixel])
+	compflux = np.array([get_flux(master_comp64, p, lowpoly(p, *traceparams), width, reduction_options.use_boxcut) for p in pixel])
+	uskyflx = np.array([get_flux(image64, p, lowpoly(p, *traceparams) + reduction_options.skyfluxsep, width, reduction_options.use_boxcut) for p in pixel])
+	lskyflx = np.array([get_flux(image64, p, lowpoly(p, *traceparams) - reduction_options.skyfluxsep, width, reduction_options.use_boxcut) for p in pixel])
 
 	skyflx = np.minimum(uskyflx, lskyflx)
 	flux -= skyflx
@@ -296,6 +600,8 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 	lines = np.genfromtxt(reduction_options.linelist)[:, 0]
 
 	progress_window.update_current("Solving Wavelength Array...", 0.45)
+
+	complamplist.get_compparams(traceparams)
 
 	if complamplist.compparams is None:
 		def call_fitlines_markov(compspec_x, compspec_y):
@@ -353,7 +659,7 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
 		compparams = [result[0], result[1], result[2], result[3]]
 
 		complamplist.compparams = compparams
-		complamplist.save_compparams()
+		complamplist.save_compparams(traceparams)
 	final_wl_arr = line(pixel, 0.0, *complamplist.compparams[::-1])
 
 	if reduction_options.debugimages:
@@ -585,8 +891,6 @@ def reduce_data(reduction_options, frame_config, progress_window):
 			print(f"WARNING: DID NOT FIND MATCHING COMPLAMP FRAMES WITHIN CONSTRAINTS FOR {frame.filepath}, skipping!")
 			continue
 
-		filtered_complamps.get_compparams()
-
 		master_comp, master_comp_header = filtered_complamps.create_master_image(master_bias=master_bias, master_continuum=master_continuum, return_header=True)
 		frame_config.comparisonframes.master_frame = Frame(master_comp, reduction_options)
 		frame_config.comparisonframes.master_frame.header = master_comp_header
@@ -606,8 +910,6 @@ def reduce_data(reduction_options, frame_config, progress_window):
 		wl, flx, flx_std = extract_spectrum(frame, master_flat, filtered_complamps, frame_config, reduction_options, progress_window)
 
 		progress_window.update_current("Saving Solution...", 0.9)	
-
-		filtered_complamps.save_compparams()
 		save_to_ascii(frame, wl, flx, flx_std, reduction_options, frame_config)
 
 		progress_window.update_current("", 0.0)
