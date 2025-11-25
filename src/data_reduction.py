@@ -296,11 +296,11 @@ def fit_single_trace(image, reduction_options, progress_window):
     for i in np.linspace(25, image.shape[1] - 10, 31):
         if 1013 < i < 1017:  # Ignore bad column
             continue
-        data = np.min(image[:, int(i - 5):int(i + 5)], axis=1)
+        data = np.median(image[:, int(i - 15):int(i + 15)], axis=1)
         data = median_filter(data, 5)
+        xarr = np.arange(len(data))
         if np.all(data < 5):
             continue
-        xarr = np.arange(len(data))
         try:
             params, *_ = curve_fit(gaussian,
                                   xarr,

@@ -247,7 +247,7 @@ class ConfigWindow(tk.Toplevel):
 
 		# Telescope Location Dropdown
 		ttk.Label(content_frame, text="Telescope Location").pack(anchor='w', padx=20, pady=(10, 5))
-		location_options = ["La Silla Observatory", "Cerro Pachon", "Roque de los Muchachos"]
+		location_options = ["La Silla Observatory", "Cerro Pachon", "Roque de los Muchachos", "Observatorio de Calar Alto"]
 		self.location_var = tk.StringVar(value=getattr(self.reduction_options, "telescope_location", "Cerro Pachon"))
 		location_dropdown = ttk.Combobox(content_frame, textvariable=self.location_var, values=location_options, state="readonly")
 		location_dropdown.pack(fill='x', padx=20)

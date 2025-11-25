@@ -304,12 +304,18 @@ class Frame:
 		dec = get_header_value(self.header, dec_keys)
 
 		sky_coord = SkyCoord(ra=ra, dec=dec, unit=(u.hourangle, u.deg))
-		# Define the VizieR catalog ID
-		catalog_id = "J/A+A/662/A40"
+		
+		try:
+			# Define the VizieR catalog ID
+			catalog_id = "J/A+A/662/A40"
 
-		# Query the VizieR catalog
-		vizier = Vizier(columns=['all'], row_limit=1)
-		sinfo = vizier.query_region(sky_coord, radius=30 * u.arcsec, catalog=catalog_id)
+			# Query the VizieR catalog
+			vizier = Vizier(columns=['all'], row_limit=1)
+			sinfo = vizier.query_region(sky_coord, radius=30 * u.arcsec, catalog=catalog_id)
+		except:
+			print("WARN: Vizier is unreachable, catalogue query failed!")
+
+
 
 		if len(sinfo) == 0:
 			# Define the coordinates
