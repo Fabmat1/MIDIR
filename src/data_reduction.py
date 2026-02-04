@@ -471,54 +471,64 @@ def fit_multitrace_interactive(image, reduction_options, progress_window):
 
 
 def get_montecarlo_results(reduction_options):
-	i = 0
-	data_list = []
-	while os.path.isfile(f".temp/mcmkc_output{i}.txt"):
-		data_list.append(np.loadtxt(f".temp/mcmkc_output{i}.txt", delimiter=",", dtype=float))
-		i += 1
-
-	data = np.concatenate(data_list)
-
-	threshold = 0
-	pct = 0.1
-	d= []
-	if len(data) > 100000:
-		while np.sum(data[:, -1] < threshold) < 100000:
-			threshold = np.percentile(data[:, -1], pct)
-			d = data[data[:, -1] < threshold]
-			pct += 0.05
-	else:
-		threshold = np.percentile(data[:, -1], pct)
-		d = data[data[:, -1] < threshold]
-
-	params = []
-	nbins = int(np.ceil(2 * (len(data[:, -1]) ** (1 / 3))))
-
-	for i in range(4):
-		hist, bin_edges = np.histogram(data[:, i], weights=1 / data[:, -1], bins=nbins)
-		bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-		# Fit the Gaussian to the histogram data
-		popt, pcov = curve_fit(markov_gaussian, bin_centers, hist,
-							   p0=[np.max(hist), bin_centers[np.argmax(hist)], np.std(data[:, i])], maxfev=1000000)
-
-		# Extract the fitting parameters and their errors
-		amp, mean, std = popt
-		amp_err, mean_err, std_err = np.sqrt(np.diag(pcov))
-
-		params.append(mean)
-		if reduction_options.debugimages:
-			plt.hist(data[:, i], weights=1 / data[:, -1], bins=nbins, alpha=0.6, label='Data')
-			x_fit = np.linspace(bin_edges[0], bin_edges[-1], 1000)
-			y_fit = markov_gaussian(x_fit, *popt)
-			plt.plot(x_fit, y_fit, color='red', label='Gaussian fit')
-			plt.title(f"MCMC result histogram: {['Offset', 'Linear', 'Quadratic', 'Cubic'][i]} Parameter")
-			plt.xlabel('Data')
-			plt.ylabel('Frequency')
-			plt.legend()
-			plt.tight_layout()
-			plt.show()
-	return params
+    i = 0
+    data_list = []
+    while os.path.isfile(f".temp/mcmkc_output{i}.txt"):
+        data_list.append(np.loadtxt(f".temp/mcmkc_output{i}.txt", delimiter=",", dtype=float))
+        i += 1
+    data = np.concatenate(data_list)
+    threshold = 0
+    pct = 0.1
+    d = []
+    if len(data) > 100000:
+        while np.sum(data[:, -1] < threshold) < 100000:
+            threshold = np.percentile(data[:, -1], pct)
+            d = data[data[:, -1] < threshold]
+            pct += 0.05
+    else:
+        threshold = np.percentile(data[:, -1], pct)
+        d = data[data[:, -1] < threshold]
+    params = []
+    nbins = int(np.ceil(2 * (len(data[:, -1]) ** (1 / 3))))
+    for i in range(4):
+        # Manual histogram implementation
+        column_data = data[:, i]
+        weights = 1 / data[:, -1]
+        
+        data_min = np.min(column_data)
+        data_max = np.max(column_data)
+        bin_edges = np.linspace(data_min, data_max, nbins + 1)
+        hist = np.zeros(nbins)
+        
+        for j in range(len(column_data)):
+            bin_idx = int((column_data[j] - data_min) / (data_max - data_min) * nbins)
+            if bin_idx >= nbins:  # Handle edge case where value == data_max
+                bin_idx = nbins - 1
+            hist[bin_idx] += weights[j]
+        
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        # Fit the Gaussian to the histogram data
+        popt, pcov = curve_fit(markov_gaussian, bin_centers, hist,
+                              p0=[np.max(hist), bin_centers[np.argmax(hist)], np.std(data[:, i])], 
+                              maxfev=1000000)
+        # Extract the fitting parameters and their errors
+        amp, mean, std = popt
+        amp_err, mean_err, std_err = np.sqrt(np.diag(pcov))
+        params.append(mean)
+        if reduction_options.debugimages:
+            # Use bar chart instead of plt.hist
+            bin_width = bin_edges[1] - bin_edges[0]
+            plt.bar(bin_centers, hist, width=bin_width, alpha=0.6, label='Data')
+            x_fit = np.linspace(bin_edges[0], bin_edges[-1], 1000)
+            y_fit = markov_gaussian(x_fit, *popt)
+            plt.plot(x_fit, y_fit, color='red', label='Gaussian fit')
+            plt.title(f"MCMC result histogram: {['Offset', 'Linear', 'Quadratic', 'Cubic'][i]} Parameter")
+            plt.xlabel('Data')
+            plt.ylabel('Frequency')
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
+    return params
 
 
 def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_options, progress_window):
