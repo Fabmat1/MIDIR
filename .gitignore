@@ -1,9 +1,12 @@
 .previousframeconfig.json
 .previousoptions.json
 .previoussolutions.json
-2024-05-30
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
 linefit
 .temp
+sdBgrid*
+*.zip
+*.csv
 output
 reduced_spectra.csv
 output_alfosc
