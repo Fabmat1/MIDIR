@@ -321,33 +321,43 @@ class ConfigWindow(tk.Toplevel):
 		# Checkbox: Cosmic Rejection
 		self.cosmic_reject_var = tk.BooleanVar(value=getattr(self.reduction_options, "cosmicrejection", False))
 		ttk.Checkbutton(
-		    left_frame, text="Attempt Automatic Cosmic Rejection",
-		    variable=self.cosmic_reject_var,
-		    command=lambda: setattr(self.reduction_options, "cosmicrejection", self.cosmic_reject_var.get())
+			left_frame, text="Attempt Automatic Cosmic Rejection",
+			variable=self.cosmic_reject_var,
+			command=lambda: setattr(self.reduction_options, "cosmicrejection", self.cosmic_reject_var.get())
 		).pack(anchor='w', pady=(0, 5))
 
-		# Checkbox: Multitrace (fixed the command to use correct variable)
-		self.multitrace = tk.BooleanVar(value=getattr(self.reduction_options, "multitrace", False))
-		ttk.Checkbutton(
-		    left_frame, text="Interactive Multitrace Extraction",
-		    variable=self.multitrace,
-		    command=lambda: setattr(self.reduction_options, "multitrace", self.multitrace.get())
-		).pack(anchor='w', pady=(0, 0))
+		# Checkbox: Multitrace
+		self.multitrace_var = tk.BooleanVar(value=getattr(self.reduction_options, "multitrace", False))
+		self.multitrace_checkbox = ttk.Checkbutton(
+			left_frame, text="Interactive Multitrace Extraction",
+			variable=self.multitrace_var,
+			command=self.on_multitrace_changed
+		)
+		self.multitrace_checkbox.pack(anchor='w', pady=(0, 5))
+
+		# Checkbox: Low Quality Mode (NEW)
+		self.low_quality_var = tk.BooleanVar(value=getattr(self.reduction_options, "low_quality_mode", False))
+		self.low_quality_checkbox = ttk.Checkbutton(
+			left_frame, text="Low Quality Data (Manual Trace)",
+			variable=self.low_quality_var,
+			command=self.on_low_quality_changed
+		)
+		self.low_quality_checkbox.pack(anchor='w', pady=(0, 0))
 
 		# Right column checkboxes
 		# Checkbox: Boxcut Extraction
 		self.boxcut_var = tk.BooleanVar(value=getattr(self.reduction_options, "use_boxcut", True))
 		ttk.Checkbutton(
-		    right_frame, text="Use Boxcut Extraction",
-		    variable=self.boxcut_var,
-		    command=lambda: setattr(self.reduction_options, "use_boxcut", self.boxcut_var.get())
+			right_frame, text="Use Boxcut Extraction",
+			variable=self.boxcut_var,
+			command=lambda: setattr(self.reduction_options, "use_boxcut", self.boxcut_var.get())
 		).pack(anchor='w', pady=(0, 5))
 
 		# Show Plots checkbox
 		self.show_plots_var = tk.BooleanVar(value=getattr(self.reduction_options, "debugimages", False))
 		ttk.Checkbutton(
-		    right_frame, text="Show Plots", variable=self.show_plots_var,
-		    command=lambda: setattr(self.reduction_options, "debugimages", self.show_plots_var.get())
+			right_frame, text="Show Plots", variable=self.show_plots_var,
+			command=lambda: setattr(self.reduction_options, "debugimages", self.show_plots_var.get())
 		).pack(anchor='w', pady=(0, 0))
 
 
@@ -499,6 +509,22 @@ class ConfigWindow(tk.Toplevel):
 			except AttributeError:
 				self.update_file_count_label(ft, 0)
 
+	def on_multitrace_changed(self):
+		"""Handle multitrace checkbox change - mutually exclusive with low quality mode"""
+		if self.multitrace_var.get():
+			# Disable low quality mode when multitrace is enabled
+			self.low_quality_var.set(False)
+			setattr(self.reduction_options, "low_quality_mode", False)
+		setattr(self.reduction_options, "multitrace", self.multitrace_var.get())
+	
+	def on_low_quality_changed(self):
+		"""Handle low quality checkbox change - mutually exclusive with multitrace"""
+		if self.low_quality_var.get():
+			# Disable multitrace when low quality mode is enabled
+			self.multitrace_var.set(False)
+			setattr(self.reduction_options, "multitrace", False)
+		setattr(self.reduction_options, "low_quality_mode", self.low_quality_var.get())
+
 	def refresh_ui_fields(self):
 		# Match Mode
 		match_mode_display = "Select N Comparison Frames" if self.reduction_options.comparison_match_mode == "count" else "Select by Time Window (minutes)"
@@ -515,6 +541,7 @@ class ConfigWindow(tk.Toplevel):
 
 		self.cosmic_reject_var.set(self.reduction_options.cosmicrejection)
 		self.multitrace.set(self.reduction_options.multitrace)
+		self.low_quality_var.set(getattr(self.reduction_options, "low_quality_mode", False))
 		self.boxcut_var.set(self.reduction_options.use_boxcut)
 		self.show_plots_var.set(self.reduction_options.debugimages)
 
