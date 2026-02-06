@@ -21,6 +21,7 @@ from collections import defaultdict
 
 from version import __version__
 from src.updater import check_for_updates
+from src.font_loader import register_fonts, apply_font_globally, get_font
 
 def filter_by_common_frame_shape(bias_list, flat_list, shifted_flat_list, science_list, complamp_list):
 	# Group frames by their data.shape
@@ -850,6 +851,10 @@ class ProgressWindow(tk.Toplevel):
 class DataReductionGUI(tk.Tk):
 	def __init__(self, *args, **kwargs):
 		super().__init__()
+
+		register_fonts(self)
+		apply_font_globally(self, size=10)
+
 		self.title("Multi-Instrument Data Input Reducer")
 		try:
 			imgicon = ImageTk.PhotoImage(Image.open("src/MIDIR_icon.png"))
@@ -878,10 +883,18 @@ class DataReductionGUI(tk.Tk):
 
 		welcome_label = ttk.Label(
 			content_frame,
-			text=f"Welcome to MIDIR! (v{__version__})",
-			font=("Segoe UI", 12),
+			text="Welcome to MIDIR!",
+			font=get_font(13, "bold"),
 		)
-		welcome_label.pack(pady=(0, 10))
+		welcome_label.pack(pady=(0, 2))
+
+		version_label = ttk.Label(
+			content_frame,
+			text=f"v{__version__}",
+			font=get_font(9),
+			foreground="gray",
+		)
+		version_label.pack(pady=(0, 10))
 
 		start_button = ttk.Button(
 			content_frame,

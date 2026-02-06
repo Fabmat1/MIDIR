@@ -135,14 +135,14 @@ class UpdateDialog(tk.Toplevel):
         header = ttk.Label(
             self,
             text=f"A new version is available!",
-            font=("Segoe UI", 13, "bold"),
+            font=get_font(13, "bold"),
         )
         header.pack(pady=(18, 4))
 
         version_label = ttk.Label(
             self,
             text=f"Current: v{__version__}   →   Latest: v{remote_version}",
-            font=("Segoe UI", 10),
+            font=get_font(10),
         )
         version_label.pack(pady=(0, 10))
 
