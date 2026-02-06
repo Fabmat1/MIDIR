@@ -9,6 +9,11 @@ import time
 from astropy.coordinates import SkyCoord, EarthLocation
 from scipy.optimize import curve_fit
 from scipy.constants import speed_of_light
+import ctypes
+from numpy.ctypeslib import ndpointer
+from scipy.ndimage import maximum_filter, gaussian_filter
+import os
+import platform
 
 grey_cmap = copy.copy(matplotlib.cm.get_cmap('Greys_r'))
 grey_cmap.set_bad((0,0,0))	
@@ -57,7 +62,6 @@ def wlshift(wl, vel_corr):
 def get_central_wavelength(gra_angle, cam_angle, d_grating):
     return (np.sin(gra_angle * 2 * np.pi / 360) + np.sin((cam_angle - gra_angle) * 2 * np.pi / 360)) / (
             d_grating * 1.e-7)
-
 
 def get_flux(image, x_ind, y_ind, width, boxcut=True):
 
@@ -118,11 +122,53 @@ def fluxstatistics(wl, flux):
     return wl, flux, flx_std
 
 
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
-from scipy.ndimage import median_filter
-import matplotlib.colors as colors
+
+def _load_linefit_lib():
+    """Load the shared library once."""
+    if platform.system() == "Windows":
+        lib_name = "linefit.dll"
+    elif platform.system() == "Darwin":
+        lib_name = "./liblinefit.dylib"
+    else:
+        lib_name = "./liblinefit.so"
+
+    lib = ctypes.CDLL(lib_name)
+
+    lib.get_num_threads.restype = ctypes.c_int
+    lib.get_num_threads.argtypes = []
+
+    lib.get_histogram_nbins.restype = ctypes.c_int
+    lib.get_histogram_nbins.argtypes = [ctypes.c_int]
+
+    lib.run_mcmc.restype = None
+    lib.run_mcmc.argtypes = [
+        ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),  # compspec_x
+        ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),  # compspec_y
+        ctypes.c_int,                                       # compspec_size
+        ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),  # lines
+        ctypes.c_int,                                       # lines_size
+        ctypes.c_int,                                       # n_samples
+        ctypes.c_double,                                    # wl_start
+        ctypes.c_double,                                    # spacing
+        ctypes.c_double,                                    # quadratic_fac
+        ctypes.c_double,                                    # cubic_fac
+        ctypes.c_double,                                    # wl_stepsize
+        ctypes.c_double,                                    # spacing_stepsize
+        ctypes.c_double,                                    # quad_stepsize
+        ctypes.c_double,                                    # cub_stepsize
+        ctypes.c_double,                                    # wl_cov
+        ctypes.c_double,                                    # spacing_cov
+        ctypes.c_double,                                    # quad_cov
+        ctypes.c_double,                                    # cub_cov
+        ctypes.c_double,                                    # acc_param
+        ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),  # hist_output
+        ctypes.c_int,                                       # nbins
+        ctypes.POINTER(ctypes.c_int),                       # out_n_threads
+    ]
+
+    return lib
+
+_linefit_lib = _load_linefit_lib()
 
 class InteractiveTraceSelector:
     def __init__(self, image):
@@ -774,64 +820,90 @@ def fit_lowquality_manual(image, reduction_options, progress_window):
             print("Trace rejected! Restarting manual selection...")
             continue
 
-def get_montecarlo_results(reduction_options):
-    i = 0
-    data_list = []
-    while os.path.isfile(f".temp/mcmkc_output{i}.txt"):
-        data_list.append(np.loadtxt(f".temp/mcmkc_output{i}.txt", delimiter=",", dtype=float))
-        i += 1
-    data = np.concatenate(data_list)
-    threshold = 0
-    pct = 0.1
-    d = []
-    if len(data) > 100000:
-        while np.sum(data[:, -1] < threshold) < 100000:
-            threshold = np.percentile(data[:, -1], pct)
-            d = data[data[:, -1] < threshold]
-            pct += 0.05
-    else:
-        threshold = np.percentile(data[:, -1], pct)
-        d = data[data[:, -1] < threshold]
+def run_mcmc_and_fit(compspec_x, compspec_y, lines,
+                     n_samples, wl_start, spacing,
+                     quadratic_fac, cubic_fac,
+                     wl_stepsize, spacing_stepsize,
+                     quad_stepsize, cub_stepsize,
+                     wl_cov, spacing_cov,
+                     quad_cov, cub_cov,
+                     acc_param,
+                     debug_images=False):
+    """
+    Run the MCMC line fitting via ctypes. The C++ code computes weighted
+    histograms internally and returns only bin_centers + hist for each of
+    the 4 parameters. Gaussian fitting is done here in Python.
+
+    Returns a list of 4 parameter values [wl_start, spacing, quad, cub].
+    """
+    compspec_x = np.ascontiguousarray(compspec_x, dtype=np.float64)
+    compspec_y = np.ascontiguousarray(compspec_y, dtype=np.float64)
+    lines = np.ascontiguousarray(lines, dtype=np.float64)
+
+    compspec_size = len(compspec_x)
+    lines_size = len(lines)
+
+    # Query how many histogram bins will be used
+    nbins = _linefit_lib.get_histogram_nbins(n_samples)
+
+    # Pre-allocate output: 4 params × (nbins centers + nbins hist) = 4 × 2 × nbins
+    hist_output = np.zeros(4 * 2 * nbins, dtype=np.float64)
+    out_n_threads = ctypes.c_int(0)
+
+    # Run the MCMC + histogram computation in C++
+    _linefit_lib.run_mcmc(
+        compspec_x, compspec_y, compspec_size,
+        lines, lines_size,
+        n_samples,
+        wl_start, spacing, quadratic_fac, cubic_fac,
+        wl_stepsize, spacing_stepsize, quad_stepsize, cub_stepsize,
+        wl_cov, spacing_cov, quad_cov, cub_cov,
+        acc_param,
+        hist_output,
+        nbins,
+        ctypes.byref(out_n_threads)
+    )
+
+    # Parse the histogram output and fit Gaussians
+    param_names = ['Offset', 'Linear', 'Quadratic', 'Cubic']
     params = []
-    nbins = int(np.ceil(2 * (len(data[:, -1]) ** (1 / 3))))
-    for i in range(4):
-        # Manual histogram implementation
-        column_data = data[:, i]
-        weights = 1 / data[:, -1]
-        
-        data_min = np.min(column_data)
-        data_max = np.max(column_data)
-        bin_edges = np.linspace(data_min, data_max, nbins + 1)
-        hist = np.zeros(nbins)
-        
-        for j in range(len(column_data)):
-            bin_idx = int((column_data[j] - data_min) / (data_max - data_min) * nbins)
-            if bin_idx >= nbins:  # Handle edge case where value == data_max
-                bin_idx = nbins - 1
-            hist[bin_idx] += weights[j]
-        
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        # Fit the Gaussian to the histogram data
-        popt, pcov = curve_fit(markov_gaussian, bin_centers, hist,
-                              p0=[np.max(hist), bin_centers[np.argmax(hist)], np.std(data[:, i])], 
-                              maxfev=1000000)
-        # Extract the fitting parameters and their errors
-        amp, mean, std = popt
-        amp_err, mean_err, std_err = np.sqrt(np.diag(pcov))
+
+    for p in range(4):
+        base = p * 2 * nbins
+        bin_centers = hist_output[base:base + nbins]
+        hist = hist_output[base + nbins:base + 2 * nbins]
+
+        # Gaussian fit — same as the original Python code
+        try:
+            popt, pcov = curve_fit(
+                markov_gaussian, bin_centers, hist,
+                p0=[np.max(hist), bin_centers[np.argmax(hist)], np.std(bin_centers)],
+                maxfev=1000000
+            )
+            amp, mean, std = popt
+        except RuntimeError:
+            # If fit fails, fall back to weighted mean
+            mean = np.average(bin_centers, weights=hist) if np.sum(hist) > 0 else bin_centers[np.argmax(hist)]
+            popt = [np.max(hist), mean, np.std(bin_centers)]
+            print(f"Warning: Gaussian fit failed for {param_names[p]}, using weighted mean.")
+
         params.append(mean)
-        if reduction_options.debugimages:
-            # Use bar chart instead of plt.hist
-            bin_width = bin_edges[1] - bin_edges[0]
+
+        if debug_images:
+            import matplotlib.pyplot as plt
+            bin_width = bin_centers[1] - bin_centers[0] if nbins > 1 else 1.0
+            plt.figure()
             plt.bar(bin_centers, hist, width=bin_width, alpha=0.6, label='Data')
-            x_fit = np.linspace(bin_edges[0], bin_edges[-1], 1000)
+            x_fit = np.linspace(bin_centers[0], bin_centers[-1], 1000)
             y_fit = markov_gaussian(x_fit, *popt)
             plt.plot(x_fit, y_fit, color='red', label='Gaussian fit')
-            plt.title(f"MCMC result histogram: {['Offset', 'Linear', 'Quadratic', 'Cubic'][i]} Parameter")
+            plt.title(f"MCMC result histogram: {param_names[p]} Parameter")
             plt.xlabel('Data')
-            plt.ylabel('Frequency')
+            plt.ylabel('Weighted Frequency')
             plt.legend()
             plt.tight_layout()
             plt.show()
+
     return params
 
 
@@ -924,14 +996,7 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
             compspec_y = np.array(compspec_y, dtype=np.double)
 
             compspec_y /= maximum_filter(compspec_y, reduction_options.lampfilterwindow)
-
             compspec_y = gaussian_filter(compspec_y, 1)
-
-            if not os.path.isdir("./.temp"):
-                os.mkdir(".temp")
-            else:
-                shutil.rmtree("./.temp")
-                os.mkdir(".temp")
 
             offset_zero = 0
             if central_wl is None:
@@ -939,33 +1004,27 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
             else:
                 offset_zero = central_wl - reduction_options.extent_zero / 2
 
-            np.savetxt("./.temp/compspec_x.txt", compspec_x, fmt="%.9e")
-            np.savetxt("./.temp/compspec_y.txt", compspec_y, fmt="%.9e")
-            np.savetxt("./.temp/lines.txt", lines, fmt="%.9e")
-            np.savetxt("./.temp/arguments.txt", np.array([len(lines), len(compspec_x), reduction_options.sampleamt, offset_zero,
-                                                         reduction_options.extent_zero / len(compspec_x), reduction_options.quad_zero, reduction_options.cube_zero,
-                                                         reduction_options.offset_stepsize, reduction_options.linear_stepsize, reduction_options.quad_stepsize, reduction_options.cube_stepsize, 
-                                                         reduction_options.c_cov, reduction_options.s_cov, reduction_options.q_cov, reduction_options.cub_cov,
-                                                         reduction_options.accept_param]), fmt="%.9e")
+            # Run MCMC + histogram + Gaussian fit — no disk I/O
+            result = run_mcmc_and_fit(
+                compspec_x, compspec_y, lines,
+                n_samples=reduction_options.sampleamt,
+                wl_start=offset_zero,
+                spacing=reduction_options.extent_zero / len(compspec_x),
+                quadratic_fac=reduction_options.quad_zero,
+                cubic_fac=reduction_options.cube_zero,
+                wl_stepsize=reduction_options.offset_stepsize,
+                spacing_stepsize=reduction_options.linear_stepsize,
+                quad_stepsize=reduction_options.quad_stepsize,
+                cub_stepsize=reduction_options.cube_stepsize,
+                wl_cov=reduction_options.c_cov,
+                spacing_cov=reduction_options.s_cov,
+                quad_cov=reduction_options.q_cov,
+                cub_cov=reduction_options.cub_cov,
+                acc_param=reduction_options.accept_param,
+                debug_images=reduction_options.debugimages,
+            )
 
-            
-
-            process = subprocess.Popen(
-                "./linefit .temp/compspec_x.txt .temp/compspec_y.txt .temp/lines.txt .temp/arguments.txt 1",
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True)
-            for line in process.stdout:
-                print(line, end='')  # end='' prevents adding extra newlines
-
-            # Wait for the process to finish and capture any remaining output or errors
-            stdout, stderr = process.communicate()
-
-            progress_window.update_current("Reading Solution...", 0.75)
-
-            result = get_montecarlo_results(reduction_options)
-
+            progress_window.update_current("Solution Found.", 0.85)
             return result
 
         result = call_fitlines_markov(pixel, compflux)
