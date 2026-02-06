@@ -5,7 +5,7 @@ import tkinter.filedialog as fd
 import tkinter.ttk as ttk
 from PIL import ImageTk, Image
 import sv_ttk
-import copy
+import copy 
 import matplotlib.pyplot as plt
 from scipy.ndimage import median_filter
 from collections import defaultdict
@@ -18,6 +18,9 @@ from src.data_reduction import reduce_data
 import tkinter as tk
 from tkinter import ttk
 from collections import defaultdict
+
+from version import __version__
+from src.updater import check_for_updates
 
 def filter_by_common_frame_shape(bias_list, flat_list, shifted_flat_list, science_list, complamp_list):
 	# Group frames by their data.shape
@@ -540,7 +543,7 @@ class ConfigWindow(tk.Toplevel):
 		self.location_var.set(self.reduction_options.telescope_location)
 
 		self.cosmic_reject_var.set(self.reduction_options.cosmicrejection)
-		self.multitrace.set(self.reduction_options.multitrace)
+		self.multitrace_var.set(self.reduction_options.multitrace)
 		self.low_quality_var.set(getattr(self.reduction_options, "low_quality_mode", False))
 		self.boxcut_var.set(self.reduction_options.use_boxcut)
 		self.show_plots_var.set(self.reduction_options.debugimages)
@@ -870,21 +873,24 @@ class DataReductionGUI(tk.Tk):
 		config_window = ConfigWindow(self)
 		config_window.focus()
 
-		# Centered content frame
 		content_frame = tk.Frame(self)
 		content_frame.pack(expand=True)
 
-		# Welcome label
-		welcome_label = ttk.Label(content_frame, text="Welcome to MIDIR!", font=("Segoe UI", 12))
+		welcome_label = ttk.Label(
+			content_frame,
+			text=f"Welcome to MIDIR! (v{__version__})",
+			font=("Segoe UI", 12),
+		)
 		welcome_label.pack(pady=(0, 10))
 
-		# Start button
 		start_button = ttk.Button(
-			content_frame, 
-			text="Start Reduction", 
-			command=self.start_reduction
+			content_frame,
+			text="Start Reduction",
+			command=self.start_reduction,
 		)
 		start_button.pack()
+
+		self.after(1500, lambda: check_for_updates(self))
 
 	def on_close(self):
 		self.reduction_options.save_to_json()
