@@ -35,12 +35,19 @@ def _register_linux():
     """Install into user fontconfig dir and rebuild cache."""
     user_font_dir = Path.home() / ".local" / "share" / "fonts" / "midir"
     user_font_dir.mkdir(parents=True, exist_ok=True)
-
     changed = False
     for filename in FONT_FILES.values():
         src = FONT_DIR / filename
         dst = user_font_dir / filename
-        if src.exists() and not dst.exists():
+
+        if not src.exists():
+            continue
+
+        # Remove dangling symlink before attempting to (re)create
+        if dst.is_symlink() and not dst.exists():
+            dst.unlink()
+
+        if not dst.exists():
             try:
                 dst.symlink_to(src.resolve())
             except OSError:
