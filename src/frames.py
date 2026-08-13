@@ -432,17 +432,23 @@ class FrameList:
 	def create_master_image(self, master_bias=None, master_continuum=None, return_header=False):
 		# Stack all image data into a 3D array: shape (N_frames, H, W)
 		image_stack = np.stack([frame.data.astype(np.uint32) for frame in self.frames])
-		
-		# Collect all headers
 		headers = [dict(frame.header) for frame in self.frames]
 
 		if master_bias is not None:
 			bias_data = master_bias.data.astype(np.uint32)
-			# Subtract bias where image > bias, else zero
 			image_stack = np.where(image_stack > bias_data, image_stack - bias_data, 0)
 
-		# Compute mean across all frames
-		master = np.mean(image_stack, axis=0)
+		# Sigma-clipped mean to reject cosmic rays before combining
+		image_stack = image_stack.astype(np.float64)
+		mean = np.mean(image_stack, axis=0)
+		std = np.std(image_stack, axis=0)
+		sigma = 3.0
+		mask = np.abs(image_stack - mean) > sigma * std  # True where cosmic ray suspected
+		image_stack_masked = np.where(mask, np.nan, image_stack)
+		master = np.nanmean(image_stack_masked, axis=0)
+		# Any pixel clipped in ALL frames falls back to the unclipped mean
+		all_clipped = np.all(mask, axis=0)
+		master[all_clipped] = mean[all_clipped]
 
 		if master_continuum is not None:
 			master = master.astype(np.float64)
@@ -450,14 +456,17 @@ class FrameList:
 				print("WARNING: Found invalid value in master flat frame, continuing anyways...")
 				master_continuum.data[master_continuum.data == 0] = 1.0
 			master /= master_continuum.data
-			master /= master.max()
+			# Use 99.9th percentile instead of max() to avoid cosmic rays skewing normalisation
+			robust_max = np.percentile(master, 99.9)
+			if robust_max > 0:
+				master /= robust_max
 			master *= 65535
+			master = np.clip(master, 0, 65535)  # prevent overflow before cast
 
 		master = master.astype(np.uint16)
-		master[np.isnan(master)] = 0.0
+		master[np.isnan(master)] = 0
 
 		self.master_frame = Frame(master, self.reduction_options)
-
 		if not return_header:
 			return master, None
 		else:

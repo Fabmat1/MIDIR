@@ -14,6 +14,8 @@ from numpy.ctypeslib import ndpointer
 from scipy.ndimage import maximum_filter, gaussian_filter
 import os
 import platform
+import tkinter as tk
+import tkinter.ttk as ttk
 
 grey_cmap = copy.copy(matplotlib.cm.get_cmap('Greys_r'))
 grey_cmap.set_bad((0,0,0))	
@@ -995,7 +997,7 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
             compspec_x = np.array(compspec_x, dtype=np.double)
             compspec_y = np.array(compspec_y, dtype=np.double)
 
-            compspec_y /= maximum_filter(compspec_y, reduction_options.lampfilterwindow)
+            compspec_y /= np.maximum(maximum_filter(compspec_y, reduction_options.lampfilterwindow), 1e-10)
             compspec_y = gaussian_filter(compspec_y, 1)
 
             offset_zero = 0
@@ -1256,37 +1258,55 @@ def reduce_data(reduction_options, frame_config, progress_window):
     location = reduction_options.populate_earth_location()
     n_frames = len(frame_config.scienceframes.frames)
     for i, frame in enumerate(frame_config.scienceframes):
+        print(f"Processing Frame {os.path.basename(getattr(frame, 'filepath', f'frame {i+1}'))}")
         progress_window.update_overall(f"Processing spectrum {i+1}/{n_frames}...", 0.15+0.85*(i / n_frames))
         progress_window.update_current("Processing Arc Frames...", 0.0)
+        try:
+            filtered_complamps = ComplampList(get_matching_complamps(frame, frame_config, reduction_options), reduction_options)
+            if len(filtered_complamps.frames) == 0:
+                print(f"ERROR: DID NOT FIND MATCHING COMPLAMP FRAMES WITHIN CONSTRAINTS FOR {frame.filepath}, skipping!")
+                continue
+            master_comp, master_comp_header = filtered_complamps.create_master_image(master_bias=master_bias, master_continuum=master_continuum, return_header=True)
+            frame_config.comparisonframes.master_frame = Frame(master_comp, reduction_options)
+            frame_config.comparisonframes.master_frame.header = master_comp_header
+            if reduction_options.debugimages:
+                plt.imshow(master_comp, cmap=grey_cmap, norm=colors.LogNorm(vmin=np.nanmin(master_comp[master_comp != 0]), vmax=np.nanmax(master_comp)), zorder=1)
+                plt.title("Master Arc Lamp Image")
+                plt.axis("off")
+                plt.tight_layout()
+                plt.show()
+            progress_window.update_current("Getting Star Info...", 0.15)
+            frame.get_star_info()
+            progress_window.update_current("Extracting Spectrum...", 0.20)
+            wl, flx, flx_std = extract_spectrum(frame, master_flat, filtered_complamps, frame_config, reduction_options, progress_window)
+            progress_window.update_current("Saving Solution...", 0.9)
+            save_to_ascii(frame, wl, flx, flx_std, reduction_options, frame_config)
+            progress_window.update_current("", 0.0)
+        except Exception as _e:
+            _frame_name = getattr(frame, 'filepath', f'frame {i+1}')
+            _error_msg = str(_e)
+            print(f"ERROR: Failed to reduce frame {_frame_name}: {_error_msg}. Skipping.")
+            progress_window.update_current("Frame failed, skipping...", 0.0)
 
-        filtered_complamps = ComplampList(get_matching_complamps(frame, frame_config, reduction_options), reduction_options)
-        if len(filtered_complamps.frames) == 0:
-            print(f"WARNING: DID NOT FIND MATCHING COMPLAMP FRAMES WITHIN CONSTRAINTS FOR {frame.filepath}, skipping!")
+            warn_win = tk.Toplevel(progress_window)
+            warn_win.title("Frame Reduction Failed")
+            warn_win.geometry("420x160")
+            warn_win.resizable(False, False)
+
+            content = tk.Frame(warn_win)
+            content.pack(expand=True)
+
+            ttk.Label(
+                content,
+                text=f"Failed to reduce frame:\n{os.path.basename(_frame_name)}\n\nError: {_error_msg}",
+                justify="center"
+            ).pack(pady=(20, 10))
+
+            ttk.Button(content, text="OK", command=warn_win.destroy).pack(pady=(0, 15))
+
+            warn_win.protocol("WM_DELETE_WINDOW", warn_win.destroy)
+            warn_win.update()
             continue
-
-        master_comp, master_comp_header = filtered_complamps.create_master_image(master_bias=master_bias, master_continuum=master_continuum, return_header=True)
-        frame_config.comparisonframes.master_frame = Frame(master_comp, reduction_options)
-        frame_config.comparisonframes.master_frame.header = master_comp_header
-
-
-        if reduction_options.debugimages:
-            plt.imshow(master_comp, cmap=grey_cmap, norm=colors.LogNorm(vmin=np.nanmin(master_comp[master_comp != 0]), vmax=np.nanmax(master_comp)), zorder=1)
-            plt.title("Master Arc Lamp Image")
-            plt.axis("off")
-            plt.tight_layout()
-            plt.show()
-
-        progress_window.update_current("Getting Star Info...", 0.15)
-        frame.get_star_info()
-        progress_window.update_current("Extracting Spectrum...", 0.20)
-
-        wl, flx, flx_std = extract_spectrum(frame, master_flat, filtered_complamps, frame_config, reduction_options, progress_window)
-
-        progress_window.update_current("Saving Solution...", 0.9)	
-        save_to_ascii(frame, wl, flx, flx_std, reduction_options, frame_config)
-
-        progress_window.update_current("", 0.0)
-
     progress_window.update_overall("Reduction complete!", 1.0)
     time.sleep(0.5)
     progress_window.destroy()

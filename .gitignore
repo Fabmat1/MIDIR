@@ -1,20 +1,60 @@
+# ---- Build artifacts (see Makefile / README: run `make`) ----
+liblinefit.so
+liblinefit.dylib
+liblinefit.dll
+linefit
+*.o
+build/
+
+# ---- Python ----
+*__pycache__*
+*.py[cod]
+*.egg-info/
+venv
+.venv
+
+# ---- Local session / user state ----
 .previousframeconfig.json
 .previousoptions.json
 .previoussolutions.json
-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
-linefit
+.previousselection.json
 .temp
-sdBgrid*
-*.zip
-*.csv
-output
-reduced_spectra.csv
-output_alfosc
-reduced_spectra_alfosc.csv
+
+# ---- Observation data (FITS) ----
+*.fits
+*.fit
+*.fits.gz
+*.fits.fz
+*.fz
+
+# ---- Data / run directories ----
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]/
+all_alfosc/
+NOTpb1/
+NOTpb2/
+NOTrun/
 raw_spectra
-*__pycache__*
 EFOSC_testdata
-output_efosc
-reduced_spectra_*
 EFOSC_data
-venv
+sdBgrid*
+
+# ---- Reduction output ----
+output
+output_alfosc
+output_efosc
+reduced_spectra.csv
+reduced_spectra_*
+*.csv
+
+# ---- MCMC / wavelength-solver debugging ----
+plot_tempered_debug.py
+tempered_mcmc_*
+
+# ---- Archives & misc ----
+*.zip
+*.tar
+*.tar.gz
+.DS_Store
+.vscode/
+.idea/

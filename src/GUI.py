@@ -62,33 +62,30 @@ def filter_by_common_frame_shape(bias_list, flat_list, shifted_flat_list, scienc
 
 def _prompt_user_for_shape_selection(valid_shapes):
 	selected = {"shape": None}
-
-	def on_confirm():
-		selection = shape_var.get()
-		selected["shape"] = eval(selection)
-		popup.destroy()
-
-	popup = tk.Tk()
-	popup.title("Select Frame Shape Group")
-	tk.Label(popup, text="Multiple valid frame shape groups found. Please select one:").pack(padx=10, pady=10)
-
-	shape_var = tk.StringVar()
-	dropdown = ttk.Combobox(popup, textvariable=shape_var, state="readonly", width=60)
-
-	options = []
+	options = {}
 	for shape, frames in valid_shapes.items():
 		count_summary = f"{len(frames['bias'])} bias, {len(frames['flat'])} flat, {len(frames['science'])} science, {len(frames['complamp'])} complamp"
-		options.append(f"{shape} → {count_summary}")
-	dropdown['values'] = options
+		options[f"{shape} → {count_summary}"] = shape
+
+	popup = tk.Toplevel()
+	popup.title("Select Frame Shape Group")
+	popup.grab_set()  # make it modal
+
+	shape_var = tk.StringVar(popup)
+
+	def on_confirm():
+		selected["shape"] = options[shape_var.get()]
+		popup.destroy()
+
+	tk.Label(popup, text="Multiple valid frame shape groups found. Please select one:").pack(padx=10, pady=10)
+	dropdown = ttk.Combobox(popup, textvariable=shape_var, state="readonly", width=60)
+	dropdown['values'] = list(options.keys())
 	dropdown.pack(padx=10, pady=5)
 	dropdown.current(0)
-
+	shape_var.set(dropdown['values'][0])  # explicitly set initial value
 	tk.Button(popup, text="OK", command=on_confirm).pack(pady=10)
-	popup.mainloop()
-
-	return eval(shape_var.get().split(' → ')[0])  # e.g., "(1024, 1024)"
-
-
+	popup.wait_window()  # block until destroyed, instead of mainloop()
+	return selected["shape"]
 
 class ConfigWindow(tk.Toplevel):
 	def __init__(self, master):
@@ -590,11 +587,9 @@ class ConfigWindow(tk.Toplevel):
 			"Science": science_list,
 			"Arc": complamp_list
 		}
-
 		listboxes = {}
 		file_to_frame = {}
 
-		# Create tabbed view
 		notebook = ttk.Notebook(review_window)
 		notebook.pack(fill="both", expand=True)
 
@@ -602,11 +597,16 @@ class ConfigWindow(tk.Toplevel):
 			tab = ttk.Frame(notebook)
 			notebook.add(tab, text=category)
 
-			# Map filenames to frame objects
-			frame_map = {os.path.basename(f.filepath or "Created from array"): f for f in framelist}
+			# Build display labels and map them to frame objects
+			frame_map = {}
+			for f in framelist:
+				basename = os.path.basename(f.filepath or "Created from array")
+				obj = f.header.get("OBJECT", "unknown") if hasattr(f, "header") and f.header else "unknown"
+				label = f"{basename}: {obj}"
+				frame_map[label] = f
+
 			file_to_frame[category] = frame_map
 
-			# Scrollable Listbox
 			scrollbar = ttk.Scrollbar(tab)
 			listbox = tk.Listbox(tab, selectmode=tk.SINGLE, width=100, height=30)
 			listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -615,23 +615,20 @@ class ConfigWindow(tk.Toplevel):
 			scrollbar.config(command=listbox.yview)
 			listboxes[category] = listbox
 
-			# Populate
-			for filename in frame_map:
-				listbox.insert(tk.END, filename)
+			# Populate with the new labels
+			for label in sorted(frame_map.keys()):
+				listbox.insert(tk.END, label)
 
-			# Capture current category and listbox in closure
 			def bind_right_click(lb, cat):
 				menu = tk.Menu(lb, tearoff=0)
 
 				def remove_selected():
 					try:
 						index = lb.curselection()[0]
-						filename = lb.get(index)
+						label = lb.get(index)
+						frame = file_to_frame[cat].get(label)
 						lb.delete(index)
-
-						# Remove from underlying list
-						frame = file_to_frame[cat].get(filename)
-						if frame in frame_dict[cat]:
+						if frame is not None and frame in frame_dict[cat]:
 							frame_dict[cat].remove(frame)
 					except IndexError:
 						pass
@@ -672,7 +669,15 @@ class ConfigWindow(tk.Toplevel):
 				if frame.header["GRATING"] == "NO_GRATING" and frame.header["TELESCOP"] == "SOAR 4.1m":
 					# Alignment Frames should be the only without a grating
 					continue
-
+			if "OBJECT" in frame.header and "TELESCOP" in frame.header:
+				if frame.header["TELESCOP"].strip() == "NOT" and frame.header["OBJECT"] == "EasyFlat count test":
+					# Count tests are not relevant to anything or anyone.
+					continue
+				if frame.header["TELESCOP"].strip() == "NOT" and frame.header["OBJECT"] == "ALFOSC target acquisition":
+					continue
+				if frame.header["TELESCOP"].strip() == "NOT" and frame.header["OBJECT"] == "Focuspyr":
+					continue
+					
 			all_frames.append(frame)
 			print(filepath)
 
@@ -719,15 +724,23 @@ class ConfigWindow(tk.Toplevel):
 				angle = frm.header["GRT_TARG"]
 				angle_groups[angle].append(frm)
 
-			if len(angle_groups) != 2:
-				raise ValueError("Expected exactly 2 distinct grating angles in flat_list")
+			if len(angle_groups) < 2:
+				# Only one grating angle was used: this run has no shifted flats.
+				print("Only one grating angle found in flats, no shifted flats to separate.")
+			else:
+				if len(angle_groups) > 2:
+					# Fall back to the two best populated angles and let the user fix
+					# the rest in the review dialog.
+					print(f"Expected 2 distinct grating angles in flats, found {len(angle_groups)}: "
+						  f"{sorted(angle_groups.keys())}. Using the two most common ones.")
+					keep = sorted(angle_groups, key=lambda a: len(angle_groups[a]), reverse=True)[:2]
+					angle_groups = {a: angle_groups[a] for a in keep}
 
-			# Sort the angles and separate the frames
-			sorted_angles = sorted(angle_groups.keys())
-			lower_angle, higher_angle = sorted_angles[0], sorted_angles[1]
+				# Sort the angles and separate the frames
+				lower_angle, higher_angle = sorted(angle_groups.keys())
 
-			shifted_flat_list = angle_groups[higher_angle]
-			flat_list = angle_groups[lower_angle]
+				shifted_flat_list = angle_groups[higher_angle]
+				flat_list = angle_groups[lower_angle]
 
 		filter_by_common_frame_shape(bias_list,flat_list,shifted_flat_list,science_list,complamp_list)
 
