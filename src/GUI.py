@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import tkinter as tk
 import tkinter.filedialog as fd
 import tkinter.ttk as ttk
@@ -13,7 +14,7 @@ from collections import defaultdict
 
 from src.frames import *
 from src.options import * 
-from src.data_reduction import reduce_data
+from src.data_reduction import reduce_data, request_linefit_abort, ReductionAborted
 
 import tkinter as tk
 from tkinter import ttk
@@ -824,8 +825,11 @@ class ProgressWindow(tk.Toplevel):
 	def __init__(self, master):
 		super().__init__(master)
 		self.title("Reduction Progress")
-		self.geometry("400x100+200+500")
+		self.geometry("400x145+200+500")
 		self.resizable(False, False)
+
+		self.aborted = False
+		self._last_pump = 0.0
 
 		content_frame = tk.Frame(self)
 		content_frame.pack(expand=True)
@@ -842,22 +846,62 @@ class ProgressWindow(tk.Toplevel):
 		self.current_label.pack()
 
 		self.current_bar = ttk.Progressbar(content_frame, orient="horizontal", length=350, mode="determinate")
-		self.current_bar.pack(pady=(0, 10))
+		self.current_bar.pack(pady=(0, 5))
 
-		self.protocol("WM_DELETE_WINDOW", self.disable_event)  # Disable manual closing
+		self.abort_button = ttk.Button(content_frame, text="Abort", command=self.request_abort)
+		self.abort_button.pack(pady=(0, 10))
 
-	def disable_event(self):
-		pass  # Prevent user from closing the progress window manually
+		self.protocol("WM_DELETE_WINDOW", self.request_abort)  # Closing the window aborts
+
+	def request_abort(self):
+		"""Flag the reduction for abortion; it unwinds at its next checkpoint."""
+		if self.aborted:
+			return
+		self.aborted = True
+		print("Abort requested, stopping reduction...")
+
+		request_linefit_abort()  # Stop the C++ wavelength solver if it is running
+
+		try:
+			self.abort_button.config(text="Aborting...", state="disabled")
+			self.overall_label.config(text="Aborting reduction...")
+			self.current_label.config(text="Waiting for the current step to stop...")
+			self.update_idletasks()
+		except tk.TclError:
+			pass
+
+		# Unblock any interactive/debug plot the reduction may be waiting on
+		try:
+			plt.close("all")
+		except Exception:
+			pass
+
+	def pump_events(self):
+		"""Serve pending GUI events so the Abort button stays responsive."""
+		self._last_pump = time.monotonic()
+		try:
+			self.update()
+		except tk.TclError:
+			pass  # Window is gone; nothing left to redraw
+
+	def check_abort(self):
+		"""Abort checkpoint: raises ReductionAborted if the user pressed Abort."""
+		# The reduction blocks the event loop, so events are served here. This is
+		# throttled since check_abort() is called from inside frame loops.
+		if time.monotonic() - self._last_pump > 0.05:
+			self.pump_events()
+		if self.aborted:
+			raise ReductionAborted()
 
 	def update_overall(self, text, fraction):
 		self.overall_label.config(text=text)
 		self.overall_bar["value"] = fraction * 100
-		self.update_idletasks()
+		self.check_abort()
 
 	def update_current(self, text, fraction):
 		self.current_label.config(text=text)
 		self.current_bar["value"] = fraction * 100
-		self.update_idletasks()
+		self.check_abort()
 
 
 
@@ -909,25 +953,56 @@ class DataReductionGUI(tk.Tk):
 		)
 		version_label.pack(pady=(0, 10))
 
-		start_button = ttk.Button(
+		self.start_button = ttk.Button(
 			content_frame,
 			text="Start Reduction",
 			command=self.start_reduction,
 		)
-		start_button.pack()
+		self.start_button.pack()
+		self._reduction_running = False
+		self._progress_window = None
+		self._close_requested = False
 
 		self.after(1500, lambda: check_for_updates(self))
 
 	def on_close(self):
+		# Tearing down the main window while a reduction is running would leave
+		# it operating on destroyed widgets, so abort first and close once the
+		# reduction has unwound.
+		if self._reduction_running:
+			if self._progress_window is not None:
+				self._progress_window.request_abort()
+			self._close_requested = True
+			return
+
 		self.reduction_options.save_to_json()
 		self.frame_config.save_to_json()
 		self.destroy()
 
 	def start_reduction(self):
+		# The reduction serves GUI events to keep Abort responsive, so the
+		# button stays clickable while it runs - ignore those clicks.
+		if self._reduction_running:
+			return
+		self._reduction_running = True
+		self.start_button.config(state="disabled")
+
 		print(self.reduction_options)
 		progress_window = ProgressWindow(self)
+		self._progress_window = progress_window
 		self.update()  # Ensures the window shows immediately
-		reduce_data(self.reduction_options, copy.deepcopy(self.frame_config), progress_window)
+		try:
+			reduce_data(self.reduction_options, copy.deepcopy(self.frame_config), progress_window)
+		finally:
+			self._reduction_running = False
+			self._progress_window = None
+			if self._close_requested:
+				self.on_close()  # Closing was deferred until the abort finished
+			else:
+				try:
+					self.start_button.config(state="normal")
+				except tk.TclError:
+					pass  # Main window was closed
 		
 
 

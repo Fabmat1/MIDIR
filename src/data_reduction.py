@@ -14,6 +14,7 @@ from numpy.ctypeslib import ndpointer
 from scipy.ndimage import maximum_filter, gaussian_filter
 import os
 import platform
+import threading
 import tkinter as tk
 import tkinter.ttk as ttk
 
@@ -168,9 +169,43 @@ def _load_linefit_lib():
         ctypes.POINTER(ctypes.c_int),                       # out_n_threads
     ]
 
+    # Cooperative abort hooks. These are missing from libraries built before
+    # abort support was added, in which case the wavelength solver simply
+    # cannot be interrupted until it finishes.
+    for _fname in ("request_abort", "reset_abort"):
+        try:
+            _fn = getattr(lib, _fname)
+        except AttributeError:
+            print(f"WARNING: {lib_name} does not provide {_fname}(); "
+                  "run 'make' to rebuild it so the wavelength solver can be aborted.")
+            continue
+        _fn.restype = None
+        _fn.argtypes = []
+
     return lib
 
 _linefit_lib = _load_linefit_lib()
+
+
+class ReductionAborted(Exception):
+    """Raised to unwind the reduction after the user pressed Abort."""
+    pass
+
+
+def request_linefit_abort():
+    """Ask the C++ wavelength solver to stop at its next checkpoint."""
+    try:
+        _linefit_lib.request_abort()
+    except AttributeError:
+        pass  # Library built without abort support
+
+
+def reset_linefit_abort():
+    """Clear a previous abort request so the next reduction can run."""
+    try:
+        _linefit_lib.reset_abort()
+    except AttributeError:
+        pass
 
 class InteractiveTraceSelector:
     def __init__(self, image):
@@ -701,6 +736,7 @@ def fit_multitrace_interactive(image, reduction_options, progress_window):
         print("Starting interactive trace selection...")
         selector = InteractiveTraceSelector(image)
         y_min, y_max = selector.get_bounds()
+        progress_window.check_abort()  # Abort closes the selector window
         print(f"Selected Y bounds: {y_min:.1f} to {y_max:.1f}")
         
         # Fit trace with constrained bounds
@@ -779,7 +815,8 @@ def fit_multitrace_interactive(image, reduction_options, progress_window):
         print("Validating fitted trace...")
         validator = TraceValidator(image, xcenters, ycenters, params, width, reduction_options)
         accepted = validator.validate()
-        
+        progress_window.check_abort()
+
         if accepted:
             print("Trace accepted!")
             return params, width, xcenters, ycenters
@@ -801,7 +838,8 @@ def fit_lowquality_manual(image, reduction_options, progress_window):
         
         selector = ManualTraceSelector(image, reduction_options)
         params, width, xcenters, ycenters = selector.get_results()
-        
+        progress_window.check_abort()  # Never fall through to input() after an abort
+
         if params is None:
             # User cancelled or no valid fit
             response = input("No valid trace. Retry? (y/n): ").strip().lower()
@@ -814,7 +852,8 @@ def fit_lowquality_manual(image, reduction_options, progress_window):
         print("Validating fitted trace...")
         validator = TraceValidator(image, xcenters, ycenters, params, width, reduction_options)
         accepted = validator.validate()
-        
+        progress_window.check_abort()
+
         if accepted:
             print("Trace accepted!")
             return params, width, xcenters, ycenters
@@ -830,7 +869,8 @@ def run_mcmc_and_fit(compspec_x, compspec_y, lines,
                      wl_cov, spacing_cov,
                      quad_cov, cub_cov,
                      acc_param,
-                     debug_images=False):
+                     debug_images=False,
+                     progress_window=None):
     """
     Run the MCMC line fitting via ctypes. The C++ code computes weighted
     histograms internally and returns only bin_centers + hist for each of
@@ -853,7 +893,7 @@ def run_mcmc_and_fit(compspec_x, compspec_y, lines,
     out_n_threads = ctypes.c_int(0)
 
     # Run the MCMC + histogram computation in C++
-    _linefit_lib.run_mcmc(
+    mcmc_args = (
         compspec_x, compspec_y, compspec_size,
         lines, lines_size,
         n_samples,
@@ -865,6 +905,23 @@ def run_mcmc_and_fit(compspec_x, compspec_y, lines,
         nbins,
         ctypes.byref(out_n_threads)
     )
+
+    if progress_window is None:
+        _linefit_lib.run_mcmc(*mcmc_args)
+    else:
+        # Run the solver on a worker thread (the ctypes call releases the GIL)
+        # and keep serving GUI events here, so the Abort button stays alive
+        # while the C++ code is crunching.
+        worker = threading.Thread(
+            target=_linefit_lib.run_mcmc, args=mcmc_args, daemon=True
+        )
+        worker.start()
+        while worker.is_alive():
+            progress_window.pump_events()
+            time.sleep(0.05)
+        worker.join()
+        # The C++ side bails out without writing hist_output when aborted.
+        progress_window.check_abort()
 
     # Parse the histogram output and fit Gaussians
     param_names = ['Offset', 'Linear', 'Quadratic', 'Cubic']
@@ -1024,6 +1081,7 @@ def extract_spectrum(frame, master_flat, complamplist, frame_config, reduction_o
                 cub_cov=reduction_options.cub_cov,
                 acc_param=reduction_options.accept_param,
                 debug_images=reduction_options.debugimages,
+                progress_window=progress_window,
             )
 
             progress_window.update_current("Solution Found.", 0.85)
@@ -1131,27 +1189,51 @@ def save_to_ascii(frame, wl, flx, flx_std, reduction_options, frame_config):
 
 
 def reduce_data(reduction_options, frame_config, progress_window):
+    """Run the reduction, unwinding cleanly if the user hits Abort."""
+    reset_linefit_abort()
+    try:
+        _run_reduction(reduction_options, frame_config, progress_window)
+    except ReductionAborted:
+        print("Reduction aborted by user. Frames already saved are kept.")
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+        try:
+            progress_window.destroy()
+        except tk.TclError:
+            pass
+    finally:
+        reset_linefit_abort()
+
+
+def _run_reduction(reduction_options, frame_config, progress_window):
     print("Starting data reduction...")
 
     progress_window.update_overall("Rotating Frames...", 0.0)
     progress_window.update_current("Applying Rotation to Biases...", 0.0)
     for frame in frame_config.biases:
+        progress_window.check_abort()
         frame.rotate()
 
     progress_window.update_current("Applying Rotation to Flats...", 0.2)
     for frame in frame_config.flats:
+        progress_window.check_abort()
         frame.rotate()
 
     progress_window.update_current("Applying Rotation to Shifted Flats...", 0.4)
     for frame in frame_config.shiftedflats:
+        progress_window.check_abort()
         frame.rotate()
 
     progress_window.update_current("Applying Rotation to Science Frames...", 0.6)
     for frame in frame_config.scienceframes:
+        progress_window.check_abort()
         frame.rotate()
 
     progress_window.update_current("Applying Rotation to Comparison Frames...", 0.8)
     for frame in frame_config.comparisonframes:
+        progress_window.check_abort()
         frame.rotate()
     
     progress_window.update_overall("Cropping Frames...", 0.02)
@@ -1189,22 +1271,27 @@ def reduce_data(reduction_options, frame_config, progress_window):
     progress_window.update_current("Applying Cropping to Biases...", 0.66)
 
     for frame in frame_config.biases:
+        progress_window.check_abort()
         frame.crop(crop)
 
     progress_window.update_current("Applying Cropping to Flats...", 0.66+0.066)
     for frame in frame_config.flats:
+        progress_window.check_abort()
         frame.crop(crop)
 
     progress_window.update_current("Applying Cropping to Shifted Flats...", 0.66+2*0.066)
     for frame in frame_config.shiftedflats:
+        progress_window.check_abort()
         frame.crop(crop)
 
     progress_window.update_current("Applying Cropping to Science Frames...", 0.66+3*0.066)
     for frame in frame_config.scienceframes:
+        progress_window.check_abort()
         frame.crop(crop)
 
     progress_window.update_current("Applying Cropping to Comparison Frames...", 0.66+4*0.066)
     for frame in frame_config.comparisonframes:
+        progress_window.check_abort()
         frame.crop(crop)
 
     progress_window.update_current("Cropping Applied!", 1.0)
@@ -1282,6 +1369,8 @@ def reduce_data(reduction_options, frame_config, progress_window):
             progress_window.update_current("Saving Solution...", 0.9)
             save_to_ascii(frame, wl, flx, flx_std, reduction_options, frame_config)
             progress_window.update_current("", 0.0)
+        except ReductionAborted:
+            raise  # An abort is not a frame failure - let it unwind
         except Exception as _e:
             _frame_name = getattr(frame, 'filepath', f'frame {i+1}')
             _error_msg = str(_e)

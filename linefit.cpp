@@ -22,6 +22,9 @@ std::atomic<long long> global_steps_completed(0);
 std::atomic<long long> global_steps_accepted(0);
 std::atomic<int> threads_running(0);
 std::atomic<bool> stop_reporter(false);
+// Set from Python (request_abort) when the user aborts the reduction. The
+// sampling chains poll this and unwind at their next checkpoint.
+std::atomic<bool> abort_requested(false);
 
 using namespace std;
 
@@ -414,6 +417,11 @@ void run_parallel_tempering_chain(
         rand_normal[rand_idx_n++])
 
     for (int step = 0; step < total_steps; ++step) {
+        // Abort checkpoint. A relaxed load of a line that is only written on
+        // abort costs nothing next to a step, and the collected samples are
+        // discarded by the caller, so bailing out here is safe.
+        if ((step & 63) == 0 && abort_requested.load(std::memory_order_relaxed)) break;
+
         ++local_steps;
 
         // Update all temperature chains
@@ -642,6 +650,23 @@ int get_num_threads() {
     return omp_get_num_procs();
 }
 
+// --- Cooperative abort -------------------------------------------------------
+// request_abort() may be called from any thread (typically the GUI thread while
+// run_mcmc() is executing on a worker thread). run_mcmc() then returns early
+// without touching hist_output; the caller is expected to discard the results.
+
+void request_abort() {
+    abort_requested.store(true, std::memory_order_relaxed);
+}
+
+void reset_abort() {
+    abort_requested.store(false, std::memory_order_relaxed);
+}
+
+int is_aborted() {
+    return abort_requested.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 int get_histogram_nbins(int n_samples) {
     int n_threads = omp_get_num_procs();
     long long n_total = (long long)n_threads * (long long)n_samples;
@@ -661,6 +686,12 @@ void run_mcmc(const double* compspec_x, const double* compspec_y, int compspec_s
 
     int n_threads = omp_get_num_procs();
     *out_n_threads = n_threads;
+
+    // Abort may already have been requested before we got here.
+    if (abort_requested.load(std::memory_order_relaxed)) {
+        fprintf(stderr, "[Wavelength Solver] Aborted before start.\n");
+        return;
+    }
 
     global_steps_completed.store(0);
     global_steps_accepted.store(0);
@@ -709,6 +740,13 @@ void run_mcmc(const double* compspec_x, const double* compspec_y, int compspec_s
 
     stop_reporter.store(true);
     reporter.join();
+
+    if (abort_requested.load(std::memory_order_relaxed)) {
+        // The chains stopped early, so the samples are incomplete: leave
+        // hist_output untouched and let the caller raise.
+        fprintf(stderr, "[Wavelength Solver] Aborted by user.\n");
+        return;
+    }
 
     long long n_total = (long long)n_threads * (long long)n_samples;
     vector<vector<double>> all_samples(5, vector<double>(n_total));

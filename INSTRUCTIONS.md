@@ -53,6 +53,7 @@ Once everything is configured:
 
 * Click the **Start Reduction** button.
 * MIDIR will begin processing all selected science frames with the chosen calibration data and settings.
+* A progress window shows the current step. Click **Abort** (or close that window) to stop the reduction at any point, including while the wavelength solver is running. MIDIR finishes the step it is on, discards the frame it was working on, and keeps the spectra it already saved.
 
 ### 5. Check the Output
 
