@@ -16,6 +16,7 @@
 #include <numeric>
 #include <limits>
 #include <cstring>
+#include <memory>
 
 std::mutex cout_mutex;
 std::atomic<long long> global_steps_completed(0);
@@ -61,149 +62,105 @@ inline void eval_poly_and_deriv(double x, double a, double b, double c, double d
     fp = c + x * (2.0 * b + x * 3.0 * a);
 }
 
-// Robust inverse using Newton-Raphson with bisection fallback
-double inverse_cub_poly(double y, double a, double b, double c, double d) {
-    // Solve: a*x³ + b*x² + c*x + d = y
-    // Rearrange to: a*x³ + b*x² + c*x + (d - y) = 0
-    
-    double d_shifted = d - y;
-    
-    // Handle degenerate cases first
-    double abs_a = fabs(a);
-    double abs_b = fabs(b);
-    double abs_c = fabs(c);
-    
-    // Essentially linear (most common case for small cubic/quadratic)
-    if (abs_a < 1e-20 && abs_b < 1e-15) {
-        if (abs_c < 1e-20) return NAN;
-        return -d_shifted / c;
-    }
-    
-    // Essentially quadratic
-    if (abs_a < 1e-20) {
-        double disc = c * c - 4.0 * b * d_shifted;
-        if (disc < 0) return NAN;
-        double sqrt_disc = sqrt(disc);
-        // Return root closest to linear solution
-        double r1 = (-c + sqrt_disc) / (2.0 * b);
-        double r2 = (-c - sqrt_disc) / (2.0 * b);
-        double linear_approx = -d_shifted / c;
-        return (fabs(r1 - linear_approx) < fabs(r2 - linear_approx)) ? r1 : r2;
-    }
-    
-    // Full cubic case: use Newton-Raphson with good initial guess and bracketing
-    
-    // For wavelength calibration, x is typically in [0, 1] (normalized pixel)
-    // The polynomial should be monotonic, so we can bracket the root
-    
-    // Initial guess: use linear approximation
-    double x;
-    if (abs_c > 1e-20) {
-        x = -d_shifted / c;  // Linear approximation
-    } else if (abs_b > 1e-20) {
-        // Quadratic approximation
-        double disc = -d_shifted / b;
-        x = (disc > 0) ? sqrt(disc) : 0.5;
-    } else {
-        x = cbrt(-d_shifted / a);
-    }
-    
-    // Clamp initial guess to reasonable range
-    x = fmax(-10.0, fmin(10.0, x));
-    
-    // Newton-Raphson with safety checks
-    double f, fp;
-    double prev_x = x;
-    double best_x = x;
-    eval_poly_and_deriv(x, a, b, c, d_shifted, f, fp);
-    double best_f = fabs(f);
-    
-    for (int iter = 0; iter < 30; ++iter) {
-        eval_poly_and_deriv(x, a, b, c, d_shifted, f, fp);
-        
-        // Track best solution
-        if (fabs(f) < best_f) {
-            best_f = fabs(f);
-            best_x = x;
-        }
-        
-        // Check convergence
-        if (fabs(f) < 1e-14 * (fabs(y) + 1.0)) {
-            return x;
-        }
-        
-        // Newton step
-        if (fabs(fp) < 1e-30) {
-            // Derivative too small, perturb and continue
-            x += (f > 0 ? -1e-6 : 1e-6);
-            continue;
-        }
-        
-        double dx = f / fp;
-        
-        // Damping for large steps (prevents oscillation)
-        if (fabs(dx) > 1.0) {
-            dx = (dx > 0) ? 1.0 : -1.0;
-        }
-        
-        prev_x = x;
-        x -= dx;
-        
-        // Check for convergence
-        if (fabs(dx) < 1e-14 * (fabs(x) + 1e-10)) {
-            return x;
-        }
-        
-        // Check for oscillation (stuck between two values)
-        if (iter > 5 && fabs(x - prev_x) < 1e-13) {
-            break;
+// ---------------------------------------------------------------------------
+// Inverse of the dispersion polynomial, solved in the NORMALISED pixel
+// coordinate u = (x - x_lo) / (x_hi - x_lo), so that the detector spans
+// u ∈ [0, 1].
+//
+// This normalisation is what makes the solver fast. The step damping below
+// (|du| ≤ 1) and the bisection bracket ([-2, 2]) are only meaningful if one
+// unit of the abscissa is comparable to the width of the domain. Feeding this
+// routine raw pixel indices (0…2000) instead - as the caller used to - caps
+// Newton at one *pixel* per iteration while the initial guess is ~100 px off,
+// so it never converges and every single inversion falls through to a 60-step
+// bisection: ~94 polynomial evaluations per line instead of ~4.
+//
+// Caller passes the coefficients already recast onto u:
+//     A u³ + B u² + C u + D = y
+// which for x = x_lo + u·S (S = x_hi - x_lo) means
+//     A = a·S³, B = S²(b + 3a·x_lo), C = S(c + 2b·x_lo + 3a·x_lo²),
+//     D = d + c·x_lo + b·x_lo² + a·x_lo³.
+// In these units C is the full wavelength extent (~10³ Å) and B, A are the
+// total quadratic/cubic excursions across the chip, so the problem is well
+// conditioned regardless of instrument.
+//
+// Returns NaN if no usable root was found; the caller treats anything outside
+// [0, 1] as a non-match.
+// ---------------------------------------------------------------------------
+inline double inverse_unit_poly(double y, double A, double B, double C, double D) {
+    const double D_shifted = D - y;
+    const double ftol = 1e-14 * (fabs(y) + 1.0);
+
+    // --- Initial guess -----------------------------------------------------
+    // Start from the linear solution, then upgrade it with the quadratic term
+    // when that term is large enough to matter (it is, for grisms with strong
+    // curvature). This puts us inside Newton's quadratic-convergence basin.
+    double u = -D_shifted / C;
+    if (B != 0.0) {
+        const double disc = C * C - 4.0 * B * D_shifted;
+        if (disc >= 0.0) {
+            // Stable quadratic roots: avoids cancellation when 4BD ≪ C².
+            const double q = -0.5 * (C + copysign(sqrt(disc), C));
+            const double r1 = q / B;
+            const double r2 = (q != 0.0) ? (D_shifted / q) : r1;
+            u = (fabs(r1 - u) < fabs(r2 - u)) ? r1 : r2;
         }
     }
-    
-    // If Newton didn't converge well, try bisection in a reasonable range
-    // Find brackets by scanning
-    double x_lo = -2.0, x_hi = 2.0;
-    double f_lo, f_hi, fp_dummy;
-    eval_poly_and_deriv(x_lo, a, b, c, d_shifted, f_lo, fp_dummy);
-    eval_poly_and_deriv(x_hi, a, b, c, d_shifted, f_hi, fp_dummy);
-    
-    // Expand range if needed to bracket root
-    for (int i = 0; i < 10 && f_lo * f_hi > 0; ++i) {
-        x_lo *= 2.0;
-        x_hi *= 2.0;
-        eval_poly_and_deriv(x_lo, a, b, c, d_shifted, f_lo, fp_dummy);
-        eval_poly_and_deriv(x_hi, a, b, c, d_shifted, f_hi, fp_dummy);
+    // Also catches NaN/Inf from a degenerate C or B.
+    if (!(u > -10.0 && u < 10.0)) u = 0.5;
+
+    // --- Newton-Raphson ----------------------------------------------------
+    double best_u = u;
+    double best_f = HUGE_VAL;
+
+    for (int iter = 0; iter < 12; ++iter) {
+        double f, fp;
+        eval_poly_and_deriv(u, A, B, C, D_shifted, f, fp);
+
+        const double af = fabs(f);
+        if (af < best_f) { best_f = af; best_u = u; }
+        if (af < ftol) return u;
+
+        if (fabs(fp) < 1e-30) break;  // stationary point - hand over to bisection
+
+        double du = f / fp;
+        if (du > 1.0) du = 1.0;
+        else if (du < -1.0) du = -1.0;
+        u -= du;
+
+        // One unit of u is the whole detector, so this is ~1e-10 px: far below
+        // any precision the interpolation downstream can make use of.
+        if (fabs(du) < 1e-13) return u;
     }
-    
-    if (f_lo * f_hi > 0) {
-        // Couldn't bracket - return best Newton result
-        return best_x;
+
+    // --- Bisection fallback ------------------------------------------------
+    // [-2, 2] brackets the detector with a wide margin. A root outside it maps
+    // outside [0, 1] and is rejected by the caller anyway, so there is nothing
+    // to gain from expanding the bracket.
+    double u_lo = -2.0, u_hi = 2.0, f_lo, f_hi, fp_dummy;
+    eval_poly_and_deriv(u_lo, A, B, C, D_shifted, f_lo, fp_dummy);
+    eval_poly_and_deriv(u_hi, A, B, C, D_shifted, f_hi, fp_dummy);
+
+    if (f_lo * f_hi > 0.0) {
+        // No sign change: either no root here, or an even number of them.
+        // Fall back on Newton's best effort, as before.
+        return best_u;
     }
-    
-    // Bisection
+
     for (int iter = 0; iter < 60; ++iter) {
-        double x_mid = 0.5 * (x_lo + x_hi);
+        const double u_mid = 0.5 * (u_lo + u_hi);
         double f_mid;
-        eval_poly_and_deriv(x_mid, a, b, c, d_shifted, f_mid, fp_dummy);
-        
-        if (fabs(f_mid) < 1e-14 * (fabs(y) + 1.0)) {
-            return x_mid;
-        }
-        
-        if (f_mid * f_lo < 0) {
-            x_hi = x_mid;
-            f_hi = f_mid;
-        } else {
-            x_lo = x_mid;
-            f_lo = f_mid;
-        }
-        
-        if (x_hi - x_lo < 1e-14 * (fabs(x_mid) + 1e-10)) {
-            return x_mid;
-        }
+        eval_poly_and_deriv(u_mid, A, B, C, D_shifted, f_mid, fp_dummy);
+
+        if (fabs(f_mid) < ftol) return u_mid;
+
+        if (f_mid * f_lo < 0.0) { u_hi = u_mid; f_hi = f_mid; }
+        else                    { u_lo = u_mid; f_lo = f_mid; }
+
+        if (u_hi - u_lo < 1e-15) return u_mid;
     }
-    
-    return 0.5 * (x_lo + x_hi);
+
+    return 0.5 * (u_lo + u_hi);
 }
 
 // ============================================================================
@@ -217,132 +174,168 @@ struct ObjectiveResult {
 };
 
 
-double compute_objective(double cubic_fac, double quadratic_fac, double spacing,
-                         double wl_start, const vector<double>& lines,
-                         const vector<double>& compspec_x,
-                         const vector<double>& compspec_y) {
-    const int n_lines = (int)lines.size();
-    const int n_comp = (int)compspec_x.size();
-    const double x_lo = compspec_x[0];
-    const double x_hi = compspec_x[n_comp - 1];
-    const double x_range_inv = 1.0 / (x_hi - x_lo);
-    
-    // Thread-local static buffer to avoid repeated allocation
-    thread_local vector<double> residuals;
-    residuals.resize(n_lines);
-    
-    int valid_count = 0;
-    
-    for (int i = 0; i < n_lines; ++i) {
-        double line_wl = lines[i];
-        double tl = inverse_cub_poly(line_wl, cubic_fac, quadratic_fac, spacing, wl_start);
-        
-        if (tl != tl || tl < x_lo || tl > x_hi) {  // NaN check: tl != tl
-            residuals[valid_count++] = 1.0;
-            continue;
+// Everything about the comparison spectrum and the line list that does not
+// change from one MCMC proposal to the next. Built once per chain so the inner
+// loop touches raw pointers only.
+struct ObjectiveCtx {
+    const double* compspec_y;
+    const double* lines;
+    int n_comp;
+    int n_lines;
+    int n_keep;         // how many residuals survive the 80% trim
+    double x_lo;
+    double span;        // x_hi - x_lo
+    double t_scale;     // n_comp - 1: normalised position -> grid index
+    double* resid;      // scratch, n_lines doubles, owned by the chain
+    double* uroot;      // scratch, n_lines doubles, owned by the chain
+};
+
+// Squared residual for a line that landed at normalised position u ∈ [0,1].
+static inline double residual_at(double u, double t_scale, int n_comp,
+                                 const double* __restrict cy) {
+    // u ∈ [0,1] already, so the grid index needs no lower clamp.
+    const double t = u * t_scale;
+    int j = (int)t;
+    if (j >= n_comp - 1) j = n_comp - 2;
+
+    const double frac = t - j;
+    const double y = cy[j] + frac * (cy[j + 1] - cy[j]);
+
+    const double resid = 1.0 - y;
+    return resid * resid;
+}
+
+// Is the dispersion strictly monotonic across the whole chip? p'(u) is a
+// quadratic, so it suffices to check both ends plus the vertex if it falls
+// inside [0,1]. When this holds, a wavelength has at most one pre-image on the
+// detector, which is what lets the fast path below trust any root it finds.
+static inline bool dispersion_is_monotonic(double A3, double B2, double C) {
+    const double d0 = C;                    // p'(0)
+    const double d1 = C + B2 + A3;          // p'(1)
+    if (d0 == 0.0 || d1 == 0.0) return false;
+    if ((d0 > 0.0) != (d1 > 0.0)) return false;
+
+    if (A3 != 0.0) {
+        const double u_vertex = -B2 / (2.0 * A3);
+        if (u_vertex > 0.0 && u_vertex < 1.0) {
+            const double dv = C + u_vertex * (B2 + u_vertex * A3);
+            if (dv == 0.0 || (dv > 0.0) != (d0 > 0.0)) return false;
         }
-        
-        // Fast interpolation using normalized position
-        double t = (tl - x_lo) * x_range_inv * (n_comp - 1);
-        int j = (int)t;
-        if (j < 0) j = 0;
-        if (j >= n_comp - 1) j = n_comp - 2;
-        
-        double frac = t - j;
-        double y = compspec_y[j] + frac * (compspec_y[j + 1] - compspec_y[j]);
-        
-        double resid = 1.0 - y;
-        residuals[valid_count++] = resid * resid;
     }
-    
-    if (valid_count == 0) return 1e6;
-    
-    // Use nth_element for O(n) trimmed sum instead of O(n log n) sort
-    int n_keep = (valid_count * 4 + 4) / 5;  // Keep 80%, round up
-    if (n_keep < 1) n_keep = 1;
-    
+    return true;
+}
+
+double compute_objective(double cubic_fac, double quadratic_fac, double spacing,
+                         double wl_start, const ObjectiveCtx& ctx) {
+    const int n_lines = ctx.n_lines;
+    const int n_comp = ctx.n_comp;
+    const double* __restrict cy = ctx.compspec_y;
+    const double* __restrict lines = ctx.lines;
+    double* __restrict residuals = ctx.resid;
+
+    // Recast the dispersion polynomial onto the normalised pixel coordinate
+    // u = (x - x_lo)/span once per proposal, rather than fighting the raw
+    // pixel scale inside every line's root solve. See inverse_unit_poly().
+    const double S = ctx.span;
+    const double x_lo = ctx.x_lo;
+    const double A = cubic_fac * S * S * S;
+    const double B = S * S * (quadratic_fac + 3.0 * cubic_fac * x_lo);
+    const double C = S * (spacing + x_lo * (2.0 * quadratic_fac + 3.0 * cubic_fac * x_lo));
+    const double D = wl_start + x_lo * (spacing + x_lo * (quadratic_fac + x_lo * cubic_fac));
+
+    const double t_scale = ctx.t_scale;
+    const double A3 = 3.0 * A, B2 = 2.0 * B;
+
+    if (dispersion_is_monotonic(A3, B2, C)) {
+        // ---- Fast path ----------------------------------------------------
+        // The dispersion is invertible over the chip, so a line is observable
+        // iff its wavelength lies between the two chip edges, and the root in
+        // [0,1] - if there is one - is unique. That makes a plain fixed-count
+        // Newton safe: any converged root inside [0,1] is necessarily *the*
+        // root, so we can drop the branches and let this vectorise.
+        const double p0 = D;                    // wavelength at u = 0
+        const double p1 = D + C + B + A;        // wavelength at u = 1
+        const double lam_lo = p0 < p1 ? p0 : p1;
+        const double lam_hi = p0 < p1 ? p1 : p0;
+
+        const double invC = 1.0 / C;
+        double* __restrict uroot = ctx.uroot;
+
+        #pragma omp simd
+        for (int i = 0; i < n_lines; ++i) {
+            double Ds = D - lines[i];
+            double u = -Ds * invC;
+            // Hand-unrolled: an inner loop counts as control flow and would
+            // stop the vectoriser. Six undamped iterations from the linear
+            // guess reach ~1e-12 px for every shipped preset; the rare
+            // non-convergent line is caught below.
+            for (int it = 0; it < 6; ++it) {
+                double fv = Ds + u * (C + u * (B + u * A));
+                double fp = C + u * (B2 + u * A3);
+                u -= fv / fp;
+            }
+            uroot[i] = u;
+        }
+
+        for (int i = 0; i < n_lines; ++i) {
+            const double lam = lines[i];
+
+            // Off the chip: no root in [0,1] exists, no solve needed.
+            if (lam < lam_lo || lam > lam_hi) {
+                residuals[i] = 1.0;
+                continue;
+            }
+
+            double u = uroot[i];
+            // Did the fast path land on the root? A non-converged lane, a NaN,
+            // or a root outside [0,1] fails this and is redone properly.
+            const double fv = (D - lam) + u * (C + u * (B + u * A));
+            if (!(fabs(fv) < 1e-9 * (fabs(lam) + 1.0)) || !(u >= 0.0 && u <= 1.0)) {
+                u = inverse_unit_poly(lam, A, B, C, D);
+                if (!(u >= 0.0 && u <= 1.0)) {
+                    residuals[i] = 1.0;
+                    continue;
+                }
+            }
+
+            residuals[i] = residual_at(u, t_scale, n_comp, cy);
+        }
+    } else {
+        // ---- Robust path --------------------------------------------------
+        // Non-monotonic dispersion: several pixels can share a wavelength, so
+        // "the" root is ambiguous and which one you land on matters. Use the
+        // careful solver so the objective stays exactly what it always was.
+        for (int i = 0; i < n_lines; ++i) {
+            const double u = inverse_unit_poly(lines[i], A, B, C, D);
+
+            // Rejects NaN as well: any comparison with NaN is false.
+            if (!(u >= 0.0 && u <= 1.0)) {
+                residuals[i] = 1.0;
+                continue;
+            }
+
+            residuals[i] = residual_at(u, t_scale, n_comp, cy);
+        }
+    }
+
+    if (n_lines == 0) return 1e6;
+
+    const int n_keep = ctx.n_keep;
+
     // Partial sort: elements before nth are <= nth, elements after are >= nth
-    nth_element(residuals.begin(), residuals.begin() + n_keep, residuals.begin() + valid_count);
-    
+    nth_element(residuals, residuals + n_keep, residuals + n_lines);
+
     double sum = 0.0;
     for (int i = 0; i < n_keep; ++i) {
         sum += residuals[i];
     }
-    
+
     return sum * 1000.0 / n_keep;
-}
-
-
-inline double interpolate_lines_chisq(double cubic_fac, double quadratic_fac, double spacing,
-                                       double wl_start, const vector<double>& lines,
-                                       const vector<double>& compspec_x,
-                                       const vector<double>& compspec_y) {
-    return compute_objective(cubic_fac, quadratic_fac, spacing, wl_start,
-                            lines, compspec_x, compspec_y);
 }
 
 // ============================================================================
 // PARALLEL TEMPERING MCMC
 // ============================================================================
-
-struct StepSizes {
-    double wl;
-    double spacing;
-    double quad;
-    double cub;
-};
-
-struct ChainState {
-    double wl;
-    double spacing;
-    double quad;
-    double cub;
-    double score;
-};
-
-// Reflect value into bounds
-inline double reflect_into_bounds(double val, double lo, double hi) {
-    if (val >= lo && val <= hi) return val;
-    double range = hi - lo;
-    if (range <= 0) return (lo + hi) / 2;
-    
-    while (val < lo || val > hi) {
-        if (val < lo) val = 2.0 * lo - val;
-        if (val > hi) val = 2.0 * hi - val;
-    }
-    return val;
-}
-
-// Propose new state with Gaussian steps, occasionally large jumps
-ChainState propose_state(const ChainState& current, const StepSizes& steps,
-                         double wl_lo, double wl_hi,
-                         double spacing_lo, double spacing_hi,
-                         double quad_lo, double quad_hi,
-                         double cub_lo, double cub_hi,
-                         double temperature, mt19937& gen) {
-    normal_distribution<double> normal(0.0, 1.0);
-    uniform_real_distribution<double> uniform(0.0, 1.0);
-
-    // Scale step sizes by sqrt(temperature) for better mixing at high T
-    double temp_scale = sqrt(temperature);
-
-    // Occasionally make a large jump (10% of the time)
-    double jump_scale = (uniform(gen) < 0.1) ? 5.0 : 1.0;
-
-    ChainState proposed;
-    proposed.wl = current.wl + normal(gen) * steps.wl * temp_scale * jump_scale;
-    proposed.spacing = current.spacing + normal(gen) * steps.spacing * temp_scale * jump_scale;
-    proposed.quad = current.quad + normal(gen) * steps.quad * temp_scale * jump_scale;
-    proposed.cub = current.cub + normal(gen) * steps.cub * temp_scale * jump_scale;
-
-    // Reflect into bounds
-    proposed.wl = reflect_into_bounds(proposed.wl, wl_lo, wl_hi);
-    proposed.spacing = reflect_into_bounds(proposed.spacing, spacing_lo, spacing_hi);
-    proposed.quad = reflect_into_bounds(proposed.quad, quad_lo, quad_hi);
-    proposed.cub = reflect_into_bounds(proposed.cub, cub_lo, cub_hi);
-
-    return proposed;
-}
 
 // Single parallel tempering chain group (multiple temperatures)
 void run_parallel_tempering_chain(
@@ -362,6 +355,24 @@ void run_parallel_tempering_chain(
     uniform_real_distribution<double> uniform(0.0, 1.0);
     normal_distribution<double> normal(0.0, 1.0);
 
+    // Build the invariant part of the objective once for this chain.
+    const int n_lines = (int)lines.size();
+    const int n_comp = (int)compspec_x.size();
+    vector<double> resid_scratch(n_lines > 0 ? n_lines : 1);
+    vector<double> uroot_scratch(n_lines > 0 ? n_lines : 1);
+
+    ObjectiveCtx ctx;
+    ctx.compspec_y = compspec_y.data();
+    ctx.lines      = lines.data();
+    ctx.n_comp     = n_comp;
+    ctx.n_lines    = n_lines;
+    ctx.n_keep     = max(1, (n_lines * 4 + 4) / 5);  // keep 80%, round up
+    ctx.x_lo       = compspec_x[0];
+    ctx.span       = compspec_x[n_comp - 1] - compspec_x[0];
+    ctx.t_scale    = (double)(n_comp - 1);
+    ctx.resid      = resid_scratch.data();
+    ctx.uroot      = uroot_scratch.data();
+
     const int n_temps = 6;
     const double temperatures[6] = {1.0, 3.0, 10.0, 30.0, 100.0, 300.0};
     const double inv_temperatures[6] = {1.0, 1.0/3.0, 0.1, 1.0/30.0, 0.01, 1.0/300.0};
@@ -379,9 +390,8 @@ void run_parallel_tempering_chain(
             chains[t].qu = quad_lo + uniform(gen) * (quad_hi - quad_lo);
             chains[t].cu = cub_lo + uniform(gen) * (cub_hi - cub_lo);
         }
-        chains[t].score = compute_objective(chains[t].cu, chains[t].qu, 
-                                            chains[t].sp, chains[t].wl,
-                                            lines, compspec_x, compspec_y);
+        chains[t].score = compute_objective(chains[t].cu, chains[t].qu,
+                                            chains[t].sp, chains[t].wl, ctx);
     }
 
     // Step sizes
@@ -447,8 +457,7 @@ void run_parallel_tempering_chain(
             REFLECT(new_cu, cub_lo, cub_hi);
             #undef REFLECT
 
-            double new_score = compute_objective(new_cu, new_qu, new_sp, new_wl,
-                                                 lines, compspec_x, compspec_y);
+            double new_score = compute_objective(new_cu, new_qu, new_sp, new_wl, ctx);
 
             // Metropolis acceptance
             double delta = new_score - chains[t].score;
@@ -585,57 +594,125 @@ void progress_reporter(int total_threads, long long total_steps) {
 // HISTOGRAM COMPUTATION
 // ============================================================================
 
+// Reduce the per-thread sample buffers straight into the output histograms.
+//
+// Consumes thread_samples in place: at production settings (16 threads x 2.5M
+// samples) gathering them into one contiguous array first costs an extra 1.6 GB
+// and a full copy, for nothing. Two parallel passes replace the old six serial
+// ones, and the per-sample weights are formed on the fly instead of being
+// materialised into another n_total-sized array.
+//
+// Layout: thread_samples[t] holds 5 columns of n_samples doubles - the four
+// parameters followed by the score.
 static void compute_weighted_histograms(
-    const vector<vector<double>>& all_samples,
+    const vector<unique_ptr<double[]>>& thread_samples,
+    int n_threads, long long n_samples,
     int nbins,
     double* hist_output) {
 
-    long long n_total = (long long)all_samples[0].size();
-    const vector<double>& scores = all_samples[4];
+    // ---- Pass 1: data ranges ----------------------------------------------
+    double min_score = HUGE_VAL, max_score = -HUGE_VAL;
+    double pmin[4], pmax[4];
+    for (int p = 0; p < 4; ++p) { pmin[p] = HUGE_VAL; pmax[p] = -HUGE_VAL; }
 
-    // Find score range for normalization
-    double min_score = *min_element(scores.begin(), scores.end());
-    double max_score = *max_element(scores.begin(), scores.end());
+    #pragma omp parallel
+    {
+        double l_min_s = HUGE_VAL, l_max_s = -HUGE_VAL;
+        double l_min[4], l_max[4];
+        for (int p = 0; p < 4; ++p) { l_min[p] = HUGE_VAL; l_max[p] = -HUGE_VAL; }
+
+        #pragma omp for schedule(static)
+        for (int t = 0; t < n_threads; ++t) {
+            const double* base = thread_samples[t].get();
+            const double* sc = base + 4 * n_samples;
+            for (long long j = 0; j < n_samples; ++j) {
+                const double s = sc[j];
+                if (s < l_min_s) l_min_s = s;
+                if (s > l_max_s) l_max_s = s;
+            }
+            for (int p = 0; p < 4; ++p) {
+                const double* col = base + (long long)p * n_samples;
+                for (long long j = 0; j < n_samples; ++j) {
+                    const double v = col[j];
+                    if (v < l_min[p]) l_min[p] = v;
+                    if (v > l_max[p]) l_max[p] = v;
+                }
+            }
+        }
+
+        #pragma omp critical
+        {
+            if (l_min_s < min_score) min_score = l_min_s;
+            if (l_max_s > max_score) max_score = l_max_s;
+            for (int p = 0; p < 4; ++p) {
+                if (l_min[p] < pmin[p]) pmin[p] = l_min[p];
+                if (l_max[p] > pmax[p]) pmax[p] = l_max[p];
+            }
+        }
+    }
+
     double score_range = max_score - min_score;
     if (score_range < 1e-10) score_range = 1.0;
 
+    double data_min[4], range[4];
+    for (int p = 0; p < 4; ++p) {
+        double dmin = pmin[p], dmax = pmax[p];
+        double r = dmax - dmin;
+        if (r < 1e-15) {
+            r = fabs(dmin) * 1e-6;
+            if (r < 1e-15) r = 1e-15;
+            dmin -= r / 2;
+            dmax += r / 2;
+            r = dmax - dmin;
+        }
+        data_min[p] = dmin;
+        range[p] = r;
+    }
+
+    // ---- Pass 2: weighted binning -----------------------------------------
     // Weights: exp(-normalized_score * 5) to strongly favor low scores
-    vector<double> weights(n_total);
+    vector<double> hist((size_t)4 * nbins, 0.0);
     double weight_sum = 0.0;
-    for (long long j = 0; j < n_total; ++j) {
-        double norm_score = (scores[j] - min_score) / score_range;
-        weights[j] = exp(-norm_score * 5.0);
-        weight_sum += weights[j];
+
+    double bin_scale[4];
+    for (int p = 0; p < 4; ++p) bin_scale[p] = (double)nbins / range[p];
+
+    #pragma omp parallel
+    {
+        vector<double> l_hist((size_t)4 * nbins, 0.0);
+        double l_wsum = 0.0;
+
+        #pragma omp for schedule(static)
+        for (int t = 0; t < n_threads; ++t) {
+            const double* base = thread_samples[t].get();
+            const double* sc = base + 4 * n_samples;
+            for (long long j = 0; j < n_samples; ++j) {
+                const double w = exp(-((sc[j] - min_score) / score_range) * 5.0);
+                l_wsum += w;
+                for (int p = 0; p < 4; ++p) {
+                    const double* col = base + (long long)p * n_samples;
+                    int bin_idx = (int)((col[j] - data_min[p]) * bin_scale[p]);
+                    bin_idx = max(0, min(nbins - 1, bin_idx));
+                    l_hist[(size_t)p * nbins + bin_idx] += w;
+                }
+            }
+        }
+
+        #pragma omp critical
+        {
+            weight_sum += l_wsum;
+            for (size_t k = 0; k < l_hist.size(); ++k) hist[k] += l_hist[k];
+        }
     }
-    for (long long j = 0; j < n_total; ++j) {
-        weights[j] /= weight_sum;
-    }
+
+    // Normalising here rather than per sample is equivalent and much cheaper.
+    const double inv_wsum = (weight_sum > 0.0) ? 1.0 / weight_sum : 1.0;
 
     for (int p = 0; p < 4; ++p) {
-        const vector<double>& col = all_samples[p];
-
-        double data_min = *min_element(col.begin(), col.end());
-        double data_max = *max_element(col.begin(), col.end());
-        double range = data_max - data_min;
-        if (range < 1e-15) {
-            range = fabs(data_min) * 1e-6;
-            if (range < 1e-15) range = 1e-15;
-            data_min -= range / 2;
-            data_max += range / 2;
-            range = data_max - data_min;
-        }
-
-        vector<double> hist(nbins, 0.0);
-        for (long long j = 0; j < n_total; ++j) {
-            int bin_idx = (int)((col[j] - data_min) / range * (double)nbins);
-            bin_idx = max(0, min(nbins - 1, bin_idx));
-            hist[bin_idx] += weights[j];
-        }
-
         double* out_ptr = hist_output + p * 2 * nbins;
         for (int i = 0; i < nbins; ++i) {
-            out_ptr[i] = data_min + (i + 0.5) * range / nbins;
-            out_ptr[nbins + i] = hist[i];
+            out_ptr[i] = data_min[p] + (i + 0.5) * range[p] / nbins;
+            out_ptr[nbins + i] = hist[(size_t)p * nbins + i] * inv_wsum;
         }
     }
 }
@@ -709,8 +786,12 @@ void run_mcmc(const double* compspec_x, const double* compspec_y, int compspec_s
 
     int n_burn_in = min(500000, max(50000, n_samples / 4));
 
-    vector<vector<vector<double>>> thread_samples(n_threads,
-        vector<vector<double>>(5, vector<double>(n_samples, 0.0)));
+    // One flat buffer per thread: 5 columns (wl, spacing, quad, cub, score) of
+    // n_samples each. Left uninitialised on purpose - every element is written
+    // before it is read, and this is ~1.6 GB at production settings.
+    vector<unique_ptr<double[]>> thread_samples(n_threads);
+    for (int i = 0; i < n_threads; ++i)
+        thread_samples[i].reset(new double[(size_t)5 * (size_t)n_samples]);
 
     long long total_steps = (long long)n_threads * (long long)(n_samples + n_burn_in);
     std::thread reporter(progress_reporter, n_threads, total_steps);
@@ -724,17 +805,18 @@ void run_mcmc(const double* compspec_x, const double* compspec_y, int compspec_s
         vector<double> compspec_y_vec(compspec_y, compspec_y + compspec_size);
         vector<double> lines_vec(lines, lines + lines_size);
 
+        double* base = thread_samples[i].get();
         run_parallel_tempering_chain(
             compspec_x_vec, compspec_y_vec, lines_vec,
             n_samples, n_burn_in,
             wl_start, spacing, quadratic_fac, cubic_fac,
             wl_lo, wl_hi, spacing_lo, spacing_hi,
             quad_lo, quad_hi, cub_lo, cub_hi,
-            thread_samples[i][0].data(),
-            thread_samples[i][1].data(),
-            thread_samples[i][2].data(),
-            thread_samples[i][3].data(),
-            thread_samples[i][4].data(),
+            base,
+            base + (size_t)n_samples,
+            base + (size_t)2 * n_samples,
+            base + (size_t)3 * n_samples,
+            base + (size_t)4 * n_samples,
             gen);
     }
 
@@ -748,36 +830,26 @@ void run_mcmc(const double* compspec_x, const double* compspec_y, int compspec_s
         return;
     }
 
-    long long n_total = (long long)n_threads * (long long)n_samples;
-    vector<vector<double>> all_samples(5, vector<double>(n_total));
-
-    for (int t = 0; t < n_threads; ++t) {
-        long long offset = (long long)t * (long long)n_samples;
-        for (int c = 0; c < 5; ++c) {
-            memcpy(all_samples[c].data() + offset,
-                   thread_samples[t][c].data(),
-                   n_samples * sizeof(double));
-        }
-    }
-
-    thread_samples.clear();
-    thread_samples.shrink_to_fit();
-
     // Report best
-    double best_score = all_samples[4][0];
-    long long best_idx = 0;
-    for (long long j = 1; j < n_total; ++j) {
-        if (all_samples[4][j] < best_score) {
-            best_score = all_samples[4][j];
-            best_idx = j;
+    double best_score = HUGE_VAL;
+    int best_t = 0;
+    long long best_j = 0;
+    for (int t = 0; t < n_threads; ++t) {
+        const double* sc = thread_samples[t].get() + (size_t)4 * n_samples;
+        for (long long j = 0; j < n_samples; ++j) {
+            if (sc[j] < best_score) { best_score = sc[j]; best_t = t; best_j = j; }
         }
     }
 
-    fprintf(stderr, "[Wavelength Solver] Best: WL=%.4f Sp=%.8f Qu=%.4e Cu=%.4e Score=%.2f\n",
-            all_samples[0][best_idx], all_samples[1][best_idx],
-            all_samples[2][best_idx], all_samples[3][best_idx], best_score);
+    {
+        const double* b = thread_samples[best_t].get();
+        fprintf(stderr, "[Wavelength Solver] Best: WL=%.4f Sp=%.8f Qu=%.4e Cu=%.4e Score=%.2f\n",
+                b[best_j], b[(size_t)n_samples + best_j],
+                b[(size_t)2 * n_samples + best_j], b[(size_t)3 * n_samples + best_j],
+                best_score);
+    }
 
-    compute_weighted_histograms(all_samples, nbins, hist_output);
+    compute_weighted_histograms(thread_samples, n_threads, n_samples, nbins, hist_output);
 
     fprintf(stderr, "[Wavelength Solver] Done.\n");
 }
