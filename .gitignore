@@ -6,14 +6,8 @@ linefit
 *.o
 build/
 
-# ---- Solver benchmark/verification harness: compiled bits only ----
-bench/*.so
-bench/prof_drv*
-bench/probe_inverse
-bench/verify_inverse
-bench/verify_objective
-bench/linefit_baseline.cpp
-bench/linefit_simd.cpp
+# ---- Solver benchmark/verification harness: local only ----
+bench/
 
 # ---- Python ----
 *__pycache__*
@@ -43,6 +37,7 @@ all_alfosc/
 NOTpb1/
 NOTpb2/
 NOTrun/
+AtoJ096new/
 raw_spectra
 EFOSC_testdata
 EFOSC_data
